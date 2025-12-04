@@ -1,7 +1,10 @@
 """
-Autoencoder 訓練階段（最終改良版 - 修正離群點過濾）：
-- 修正離群點過濾邏輯，避免刪除所有樣本
-- 逐欄位過濾，而非要求所有欄位都符合
+Autoencoder 訓練 - 雙重裁剪版 v3
+策略:
+1. Winsorization: 裁剪到 0.5-99.5 百分位
+2. StandardScaler 標準化
+3. 標準化後再裁剪到 [-5, 5] 範圍
+4. Bottleneck = 32 維
 """
 import pandas as pd
 import numpy as np
@@ -12,436 +15,341 @@ from tensorflow.keras.optimizers import Adam
 import tensorflow as tf
 import joblib
 import matplotlib.pyplot as plt
-from scipy import stats
 
-print("=" * 50)
-print("🤖 Step 2: Autoencoder 訓練（最終改良版 v2）")
-print("=" * 50)
+print("=" * 60)
+print("🤖 Autoencoder - 雙重裁剪版 v3")
+print("=" * 60)
 
-print("TensorFlow version:", tf.__version__)
-print("GPUs:", tf.config.list_physical_devices('GPU'))
+print(f"TensorFlow: {tf.__version__}")
+print(f"GPU: {tf.config.list_physical_devices('GPU')}")
 
-# === 1️⃣ 讀資料 ===
-df = pd.read_csv("output_anomaly.csv")
+# === 1️⃣ 載入 ===
+df = pd.read_csv("output_anomaly_combined.csv")
 df.columns = df.columns.str.strip()
+print(f"\n✅ 資料: {df.shape}")
 
-print(f"✅ 載入資料: {df.shape}")
-
-# === 2️⃣ 保存標籤 ===
 labels = df['Label'].copy()
-print(f"📋 標籤分布:\n{labels.value_counts()}")
+print(f"\n📋 標籤:")
+print(labels.value_counts())
 
-# === 3️⃣ 只用 BENIGN 訓練 Autoencoder ===
+# === 2️⃣ BENIGN ===
+print("\n" + "=" * 60)
+print("🎯 準備 BENIGN 資料")
+print("=" * 60)
+
 df_benign = df[df['Label'] == 'BENIGN'].copy()
-
-# 移除所有非特徵欄位
 exclude_cols = ['Label', 'anomaly_if']
 X_train = df_benign.drop(columns=exclude_cols, errors='ignore')
 X_train = X_train.select_dtypes(include=[np.number])
 
-print(f"✅ BENIGN 樣本數（處理前）: {len(X_train)} / {len(df)}")
-print(f"🔢 特徵維度: {X_train.shape}")
+print(f"✅ BENIGN: {len(X_train):,}")
+print(f"🔢 特徵: {X_train.shape[1]}")
 
-# === 4️⃣ 清理數值 ===
+# === 3️⃣ 清理 ===
+print("\n🧹 清理...")
 X_train = X_train.replace([np.inf, -np.inf], np.nan).fillna(0)
-X_train = np.clip(X_train, -1e9, 1e9)
+print(f"原始範圍: [{X_train.min().min():.2e}, {X_train.max().max():.2e}]")
 
-# === 🆕 5️⃣ 改良的離群點處理（平衡版）===
-print("\n🔍 移除 BENIGN 離群點（平衡版 v4）...")
+# === 🆕 4️⃣ 步驟 1: Winsorization ===
+print("\n✂️ 步驟 1: Winsorization (0.5%-99.5%)...")
 
-# 先備份
-X_train_backup = X_train.copy()
-
-# 策略：只使用整體 MSE + 極端值雙重過濾（不用 IQR）
-# 計算每個樣本的標準化後平方誤差總和
-X_train_normalized = (X_train - X_train.mean()) / (X_train.std() + 1e-8)
-sample_mse = (X_train_normalized ** 2).sum(axis=1)
-
-# 方法 1: 移除 MSE 最高的 3% 樣本（溫和）
-mse_threshold = sample_mse.quantile(0.97)
-mse_mask = sample_mse < mse_threshold
-
-print(f"  📊 MSE 過濾: 移除前 3% 高 MSE 樣本")
-print(f"     MSE 門檻: {mse_threshold:.2f}")
-print(f"     保留: {mse_mask.sum()} / {len(X_train)}")
-
-# 方法 2: 只移除有極端極端值的樣本（0.05% 和 99.95%）
-extreme_mask = pd.Series([True] * len(X_train), index=X_train.index)
-extreme_cols = []
-
+clip_params = {}
 for col in X_train.columns:
-    # 只針對真正的極端值
-    lower_extreme = X_train[col].quantile(0.0005)
-    upper_extreme = X_train[col].quantile(0.9995)
+    lower = X_train[col].quantile(0.005)
+    upper = X_train[col].quantile(0.995)
+    X_train[col] = np.clip(X_train[col], lower, upper)
+    clip_params[col] = {'lower': lower, 'upper': upper}
 
-    col_extreme = (X_train[col] < lower_extreme) | (X_train[col] > upper_extreme)
+print(f"✅ 已裁剪")
+print(f"裁剪後範圍: [{X_train.min().min():.2e}, {X_train.max().max():.2e}]")
 
-    if col_extreme.sum() > 0:
-        extreme_mask = extreme_mask & ~col_extreme
-        extreme_cols.append(col)
-
-print(f"  📊 極端值過濾: {len(extreme_cols)} 個欄位有極端值")
-print(f"     保留: {extreme_mask.sum()} / {len(X_train)}")
-
-# 結合兩種方法（OR 邏輯：任一方法認為正常即保留）
-# 只移除兩個方法都認為是離群點的樣本
-final_mask = mse_mask | extreme_mask
-
-X_train_clean = X_train[final_mask]
-
-outliers_removed = len(X_train) - len(X_train_clean)
-outlier_ratio = outliers_removed / len(X_train)
-
-print(f"  ❌ 移除離群點: {outliers_removed} ({outlier_ratio:.2%})")
-print(f"  ✅ 保留樣本數: {len(X_train_clean)}")
-
-# 安全檢查：如果移除太多（>10%）或太少樣本，使用原始資料
-if outlier_ratio > 0.10:
-    print(f"  ⚠️ 離群點比例過高 ({outlier_ratio:.2%})，使用原始資料")
-    X_train = X_train_backup
-elif outlier_ratio < 0.005:  # 改成 0.5%
-    print(f"  ℹ️ 離群點極少 ({outlier_ratio:.2%})，使用原始資料")
-    X_train = X_train_backup
-elif len(X_train_clean) < 10000:  # 至少保留 1 萬個樣本
-    print(f"  ⚠️ 保留樣本數太少 ({len(X_train_clean)})，使用原始資料")
-    X_train = X_train_backup
-else:
-    print(f"  ✅ 離群點處理成功")
-    X_train = X_train_clean
-
-print(f"\n📊 最終訓練樣本數: {len(X_train)}")
-
-# === 6️⃣ 標準化 ===
+# === 🆕 5️⃣ 步驟 2: StandardScaler ===
+print("\n📏 步驟 2: StandardScaler...")
 scaler = StandardScaler()
 X_train_scaled = scaler.fit_transform(X_train)
 
-print(f"✅ 標準化完成，形狀: {X_train_scaled.shape}")
+print(f"標準化後:")
+print(f"  Mean: {X_train_scaled.mean():.4f}")
+print(f"  Std: {X_train_scaled.std():.4f}")
+print(f"  Range: [{X_train_scaled.min():.2f}, {X_train_scaled.max():.2f}]")
 
-# === 7️⃣ 建立 Autoencoder ===
+# === 🆕 6️⃣ 步驟 3: 標準化後裁剪 ===
+print("\n✂️ 步驟 3: 標準化後裁剪 (±5σ)...")
+
+# 統計裁剪前的極端值
+extreme_count = ((X_train_scaled < -5) | (X_train_scaled > 5)).sum()
+print(f"  極端值數量: {extreme_count:,} ({extreme_count/X_train_scaled.size:.2%})")
+
+# 裁剪到 [-5, 5]
+X_train_scaled = np.clip(X_train_scaled, -5, 5)
+
+print(f"  最終範圍: [{X_train_scaled.min():.2f}, {X_train_scaled.max():.2f}]")
+print(f"  Mean: {X_train_scaled.mean():.4f}")
+print(f"  Std: {X_train_scaled.std():.4f}")
+
+# === 7️⃣ Autoencoder ===
+print("\n" + "=" * 60)
+print("🧩 Autoencoder")
+print("=" * 60)
+
 input_dim = X_train_scaled.shape[1]
-print(f"\n🧩 Autoencoder 輸入維度: {input_dim}")
+print(f"輸入: {input_dim} 維")
 
 input_layer = layers.Input(shape=(input_dim,))
 
 # Encoder
-encoded = layers.Dense(256, activation='relu',
-                      kernel_regularizer=regularizers.l2(0.001))(input_layer)
-encoded = layers.BatchNormalization()(encoded)
-encoded = layers.Dropout(0.2)(encoded)
+x = layers.Dense(128, activation='relu',
+                kernel_regularizer=regularizers.l2(0.0001))(input_layer)
+x = layers.BatchNormalization()(x)
+x = layers.Dropout(0.2)(x)
 
-encoded = layers.Dense(128, activation='relu',
-                      kernel_regularizer=regularizers.l2(0.001))(encoded)
-encoded = layers.BatchNormalization()(encoded)
-encoded = layers.Dropout(0.2)(encoded)
+x = layers.Dense(64, activation='relu',
+                kernel_regularizer=regularizers.l2(0.0001))(x)
+x = layers.BatchNormalization()(x)
+x = layers.Dropout(0.15)(x)
 
-encoded = layers.Dense(64, activation='relu',
-                      kernel_regularizer=regularizers.l2(0.001))(encoded)
-encoded = layers.BatchNormalization()(encoded)
-encoded = layers.Dropout(0.1)(encoded)
-
-# Bottleneck
-bottleneck = layers.Dense(8, activation='relu',
-                         kernel_regularizer=regularizers.l2(0.001))(encoded)
+# Bottleneck: 32
+bottleneck = layers.Dense(32, activation='relu', name='bottleneck')(x)
+print(f"Bottleneck: 32 維")
 
 # Decoder
-decoded = layers.Dense(64, activation='relu',
-                      kernel_regularizer=regularizers.l2(0.001))(bottleneck)
-decoded = layers.BatchNormalization()(decoded)
-decoded = layers.Dropout(0.1)(decoded)
+x = layers.Dense(64, activation='relu')(bottleneck)
+x = layers.BatchNormalization()(x)
+x = layers.Dropout(0.15)(x)
 
-decoded = layers.Dense(128, activation='relu',
-                      kernel_regularizer=regularizers.l2(0.001))(decoded)
-decoded = layers.BatchNormalization()(decoded)
-decoded = layers.Dropout(0.2)(decoded)
+x = layers.Dense(128, activation='relu')(x)
+x = layers.BatchNormalization()(x)
+x = layers.Dropout(0.2)(x)
 
-decoded = layers.Dense(256, activation='relu',
-                      kernel_regularizer=regularizers.l2(0.001))(decoded)
-decoded = layers.BatchNormalization()(decoded)
-decoded = layers.Dropout(0.2)(decoded)
-
-output_layer = layers.Dense(input_dim, activation='linear')(decoded)
+output_layer = layers.Dense(input_dim, activation='linear')(x)
 
 autoencoder = models.Model(inputs=input_layer, outputs=output_layer)
-
-optimizer = Adam(learning_rate=0.001)
+optimizer = Adam(learning_rate=0.001, clipnorm=1.0)
 autoencoder.compile(optimizer=optimizer, loss='mse')
 
-print("\n📝 模型結構:")
 autoencoder.summary()
 
-# === 8️⃣ 設定 Callbacks ===
-reduce_lr = ReduceLROnPlateau(
-    monitor='val_loss',
-    factor=0.5,
-    patience=5,
-    min_lr=1e-7,
-    verbose=1
-)
+# === 8️⃣ 訓練 ===
+print("\n" + "=" * 60)
+print("🚀 訓練")
+print("=" * 60)
 
-early_stop = EarlyStopping(
-    monitor='val_loss',
-    patience=10,
-    restore_best_weights=True,
-    verbose=1
-)
+callbacks = [
+    EarlyStopping(monitor='val_loss', patience=15, restore_best_weights=True, verbose=1),
+    ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-7, verbose=1)
+]
 
-# === 9️⃣ 訓練模型 ===
-print("\n🚀 開始訓練...")
 history = autoencoder.fit(
     X_train_scaled, X_train_scaled,
     epochs=100,
-    batch_size=512,
+    batch_size=1024,
     validation_split=0.15,
-    callbacks=[early_stop, reduce_lr],
-    shuffle=True,
+    callbacks=callbacks,
     verbose=1
 )
 
-print(f"\n✅ 訓練完成，實際訓練 {len(history.history['loss'])} 個 epoch")
+epochs = len(history.history['loss'])
+train_loss = history.history['loss'][-1]
+val_loss = history.history['val_loss'][-1]
 
-# === 🔟 用整份資料做重建誤差 ===
-print("\n🔍 計算全部資料的重建誤差...")
+print(f"\n✅ 完成: {epochs} epochs")
+print(f"  Train: {train_loss:.6f}, Val: {val_loss:.6f}")
+
+# === 9️⃣ 預測 ===
+print("\n" + "=" * 60)
+print("🔍 預測全部資料")
+print("=" * 60)
 
 df_all = df.drop(columns=exclude_cols, errors='ignore')
 X_all = df_all.select_dtypes(include=[np.number])
 X_all = X_all[X_train.columns]
 X_all = X_all.replace([np.inf, -np.inf], np.nan).fillna(0)
-X_all = np.clip(X_all, -1e9, 1e9)
 
+# 套用相同裁剪
+for col in X_all.columns:
+    if col in clip_params:
+        X_all[col] = np.clip(X_all[col], clip_params[col]['lower'], clip_params[col]['upper'])
+
+# 標準化並裁剪
 X_all_scaled = scaler.transform(X_all)
+X_all_scaled = np.clip(X_all_scaled, -5, 5)
 
-recon = autoencoder.predict(X_all_scaled, verbose=0)
+recon = autoencoder.predict(X_all_scaled, batch_size=2048, verbose=1)
 mse = np.mean(np.square(X_all_scaled - recon), axis=1)
 
-# === 11️⃣ 詳細診斷 ===
-print("\n" + "=" * 50)
-print("🔍 重建誤差診斷")
-print("=" * 50)
+# === 🔟 分析 ===
+print("\n" + "=" * 60)
+print("📊 分析")
+print("=" * 60)
 
-mse_benign = mse[labels == 'BENIGN']
-mse_attack = mse[labels != 'BENIGN']
+mse_b = mse[labels == 'BENIGN']
+mse_a = mse[labels != 'BENIGN']
 
-print(f"\n📊 BENIGN 樣本 MSE:")
-print(f"  - Mean: {mse_benign.mean():.6f}")
-print(f"  - Std:  {mse_benign.std():.6f}")
-print(f"  - Min:  {mse_benign.min():.6f}")
-print(f"  - Max:  {mse_benign.max():.6f}")
-print(f"  - Median: {np.median(mse_benign):.6f}")
-print(f"  - 95th percentile: {np.percentile(mse_benign, 95):.6f}")
-print(f"  - 99th percentile: {np.percentile(mse_benign, 99):.6f}")
+print(f"\n🟢 BENIGN (n={len(mse_b):,}):")
+print(f"  Mean: {mse_b.mean():.6f}")
+print(f"  Median: {np.median(mse_b):.6f}")
+print(f"  P95: {np.percentile(mse_b, 95):.6f}")
+print(f"  P99: {np.percentile(mse_b, 99):.6f}")
+print(f"  Range: [{mse_b.min():.6f}, {mse_b.max():.6f}]")
 
-print(f"\n🚨 Attack 樣本 MSE:")
-print(f"  - Mean: {mse_attack.mean():.6f}")
-print(f"  - Std:  {mse_attack.std():.6f}")
-print(f"  - Min:  {mse_attack.min():.6f}")
-print(f"  - Max:  {mse_attack.max():.6f}")
-print(f"  - Median: {np.median(mse_attack):.6f}")
+print(f"\n🔴 Attack (n={len(mse_a):,}):")
+print(f"  Mean: {mse_a.mean():.6f}")
+print(f"  Median: {np.median(mse_a):.6f}")
+print(f"  Range: [{mse_a.min():.6f}, {mse_a.max():.6f}]")
 
-print(f"\n📈 MSE 比值 (Attack/BENIGN):")
-if mse_benign.mean() > 0:
-    print(f"  - Mean 比值: {mse_attack.mean() / mse_benign.mean():.2f}x")
-if mse_benign.max() > 0:
-    print(f"  - Max 比值: {mse_attack.max() / mse_benign.max():.2f}x")
-print(f"  - Median 比值: {np.median(mse_attack) / np.median(mse_benign):.2f}x")
+ratio_mean = mse_a.mean() / mse_b.mean()
+ratio_med = np.median(mse_a) / np.median(mse_b)
 
-print(f"\n🎯 各攻擊類型 MSE:")
-for attack_type in sorted(labels[labels != 'BENIGN'].unique()):
-    mse_type = mse[labels == attack_type]
-    count = len(mse_type)
-    print(f"  {attack_type:20s}: Mean={mse_type.mean():.6f}, "
-          f"Median={np.median(mse_type):.6f}, "
-          f"Max={mse_type.max():.6f}, Count={count}")
+print(f"\n📈 分離度:")
+print(f"  Mean: {ratio_mean:.2f}x", "✅" if ratio_mean > 2 else "⚠️")
+print(f"  Median: {ratio_med:.2f}x", "✅" if ratio_med > 3 else "⚠️")
 
-# === 12️⃣ 多種門檻策略 ===
-print("\n" + "=" * 50)
-print("🎯 門檻策略比較")
-print("=" * 50)
+# 各類型
+print(f"\n🎯 各攻擊類型:")
+print(f"{'Type':<30} {'n':>8} {'Mean':>10} {'Median':>10} {'Ratio':>8}")
+print("-" * 70)
 
-thresholds = {}
-
-for p in [75, 80, 85, 90, 95, 99]:
-    thresholds[f"All_P{p}"] = np.percentile(mse, p)
-
-for p in [85, 90, 95, 97, 99, 99.5]:
-    thresholds[f"BENIGN_P{p}"] = np.percentile(mse_benign, p)
-
-for n in [2, 2.5, 3, 3.5]:
-    thresholds[f"BENIGN_M+{n}S"] = mse_benign.mean() + n * mse_benign.std()
-
-for n in [2, 3, 4, 5]:
-    median = np.median(mse_benign)
-    mad = np.median(np.abs(mse_benign - median))
-    thresholds[f"BENIGN_Med+{n}MAD"] = median + n * mad
-
-print(f"\n{'策略':<20} {'門檻值':<12} {'偵測攻擊':<15} {'誤報':<10} {'偵測率':<10} {'Precision':<10} {'F1':<10}")
-print("-" * 100)
-
-best_strategy = None
-best_f1 = 0
-all_results = []
-
-for name, threshold in sorted(thresholds.items(), key=lambda x: x[1]):
-    is_anomaly = (mse > threshold).astype(int)
-
-    tp = ((labels != 'BENIGN') & (is_anomaly == 1)).sum()
-    fp = ((labels == 'BENIGN') & (is_anomaly == 1)).sum()
-    fn = ((labels != 'BENIGN') & (is_anomaly == 0)).sum()
-    tn = ((labels == 'BENIGN') & (is_anomaly == 0)).sum()
-
-    total_attacks = (labels != 'BENIGN').sum()
-    detection_rate = tp / total_attacks if total_attacks > 0 else 0
-
-    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
-    recall = detection_rate
-    f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
-
-    print(f"{name:<20} {threshold:<12.6f} {tp:>6}/{total_attacks:<7} {fp:<10} "
-          f"{detection_rate:>8.2%}  {precision:>8.4f}  {f1:>8.4f}")
-
-    all_results.append({
-        'strategy': name,
-        'threshold': threshold,
-        'tp': tp, 'fp': fp, 'fn': fn, 'tn': tn,
-        'detection_rate': detection_rate,
-        'precision': precision,
-        'f1': f1
+stats = []
+for at in labels[labels != 'BENIGN'].unique():
+    m = mse[labels == at]
+    stats.append({
+        'type': at,
+        'n': len(m),
+        'mean': m.mean(),
+        'med': np.median(m)
     })
 
-    if f1 > best_f1:
-        best_f1 = f1
-        best_strategy = name
-        best_threshold = threshold
-        best_results = all_results[-1]
+stats.sort(key=lambda x: x['med'], reverse=True)
 
-print(f"\n🏆 推薦策略: {best_strategy}")
-print(f"🎯 推薦門檻: {best_threshold:.6f}")
-print(f"📊 F1-Score: {best_f1:.4f}")
+for s in stats:
+    r = s['med'] / np.median(mse_b)
+    st = '✅' if r > 3 else '⚠️' if r > 1.5 else '❌'
+    print(f"{st} {s['type']:<27} {s['n']:>8,} {s['mean']:>10.4f} {s['med']:>10.4f} {r:>7.1f}x")
 
-# === 13️⃣ 使用推薦門檻 ===
-threshold = best_threshold
-is_anomaly = (mse > threshold).astype(int)
+# === 1️⃣1️⃣ 門檻 ===
+print("\n" + "=" * 60)
+print("🎯 門檻")
+print("=" * 60)
 
-print(f"\n📊 使用推薦門檻的結果:")
-print(f"  - 偵測到異常: {is_anomaly.sum()} / {len(df)}")
+thresholds = {}
+for p in [90, 95, 99]:
+    thresholds[f"B{p}"] = np.percentile(mse_b, p)
+for p in [85, 90, 95]:
+    thresholds[f"A{p}"] = np.percentile(mse, p)
 
-# === 14️⃣ 輸出結果 ===
+med_b = np.median(mse_b)
+mad = np.median(np.abs(mse_b - med_b))
+for n in [3, 4, 5, 6]:
+    thresholds[f"MAD{n}"] = med_b + n * mad
+
+print(f"\n{'Strategy':<10} {'Thresh':>10} {'TPR':>7} {'FPR':>7} {'Prec':>7} {'F1':>7}")
+print("-" * 55)
+
+results = []
+for name, th in sorted(thresholds.items(), key=lambda x: x[1]):
+    pred = (mse > th).astype(int)
+    tp = ((labels != 'BENIGN') & (pred == 1)).sum()
+    fp = ((labels == 'BENIGN') & (pred == 1)).sum()
+    fn = ((labels != 'BENIGN') & (pred == 0)).sum()
+    tn = ((labels == 'BENIGN') & (pred == 0)).sum()
+
+    tpr = tp / (tp + fn) if (tp + fn) > 0 else 0
+    fpr = fp / (fp + tn) if (fp + tn) > 0 else 0
+    prec = tp / (tp + fp) if (tp + fp) > 0 else 0
+    f1 = 2 * prec * tpr / (prec + tpr) if (prec + tpr) > 0 else 0
+
+    print(f"{name:<10} {th:>10.6f} {tpr:>6.1%} {fpr:>6.1%} {prec:>6.2f} {f1:>6.3f}")
+
+    results.append({
+        'name': name, 'th': th, 'tp': tp, 'fp': fp, 'fn': fn, 'tn': tn,
+        'tpr': tpr, 'fpr': fpr, 'prec': prec, 'f1': f1
+    })
+
+best = max([r for r in results if r['prec'] > 0.5] or results, key=lambda x: x['f1'])
+
+print(f"\n🏆 {best['name']}: threshold={best['th']:.4f}")
+print(f"  TPR: {best['tpr']:.2%}, FPR: {best['fpr']:.2%}")
+print(f"  Precision: {best['prec']:.3f}, F1: {best['f1']:.3f}")
+
+# === 1️⃣2️⃣ 儲存 ===
+print("\n💾 儲存...")
+
 output = X_all.copy()
-output['anomaly_score'] = mse
-output['is_anomaly'] = is_anomaly
+output['score'] = mse
+output['anomaly'] = (mse > best['th']).astype(int)
 output['Label'] = labels.values
+output.to_csv("output_v3.csv", index=False)
 
-output.to_csv("output_autoencoder.csv", index=False)
-print("\n💾 已輸出: output_autoencoder.csv")
-
-# === 15️⃣ 儲存模型 ===
-autoencoder.save("autoencoder_cic_model.h5")
-joblib.dump(scaler, "scaler_ae.pkl")
+autoencoder.save("ae_v3.keras")
+joblib.dump(scaler, "scaler_v3.pkl")
 joblib.dump({
-    'threshold': threshold,
-    'strategy': best_strategy,
-    'all_thresholds': thresholds,
-    'best_results': best_results
-}, "threshold_info.pkl")
+    'best': best,
+    'results': results,
+    'clip_params': clip_params,
+    'features': X_train.columns.tolist(),
+    'post_clip': [-5, 5]  # 標準化後裁剪範圍
+}, "info_v3.pkl")
 
-print("✅ 已保存模型和門檻資訊")
+print(f"✅ output_v3.csv, ae_v3.keras, scaler_v3.pkl, info_v3.pkl")
 
-# === 16️⃣ 視覺化（簡化版，9 張圖）===
-fig = plt.figure(figsize=(20, 12))
+# === 視覺化 ===
+fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
-# 1. 訓練損失
-ax1 = plt.subplot(3, 3, 1)
-ax1.plot(history.history['loss'], label='Train', linewidth=2)
-ax1.plot(history.history['val_loss'], label='Val', linewidth=2)
-ax1.set_title('Training Loss')
-ax1.legend()
-ax1.grid(True, alpha=0.3)
+# 訓練
+ax = axes[0, 0]
+ax.plot(history.history['loss'], label='Train', linewidth=2)
+ax.plot(history.history['val_loss'], label='Val', linewidth=2)
+ax.set_title('Training')
+ax.legend()
+ax.grid(alpha=0.3)
 
-# 2. MSE 分佈
-ax2 = plt.subplot(3, 3, 2)
-ax2.hist(mse_benign, bins=100, alpha=0.7, label='BENIGN', color='green', density=True)
-ax2.hist(mse_attack, bins=100, alpha=0.7, label='Attack', color='red', density=True)
-ax2.axvline(threshold, color='black', linestyle='--', linewidth=2)
-ax2.set_xlabel('MSE')
-ax2.set_title('MSE Distribution')
-ax2.legend()
-ax2.grid(True, alpha=0.3)
+# MSE
+ax = axes[0, 1]
+bins = np.linspace(0, np.percentile(mse, 99), 100)
+ax.hist(mse_b, bins=bins, alpha=0.7, label='BENIGN', color='green', density=True)
+ax.hist(mse_a, bins=bins, alpha=0.7, label='Attack', color='red', density=True)
+ax.axvline(best['th'], color='black', linestyle='--', linewidth=2)
+ax.set_title('MSE Distribution')
+ax.legend()
+ax.grid(alpha=0.3)
 
-# 3. MSE 分佈（放大）
-ax3 = plt.subplot(3, 3, 3)
-max_display = np.percentile(mse, 98)
-ax3.hist(mse_benign[mse_benign < max_display], bins=100, alpha=0.7, label='BENIGN', color='green', density=True)
-ax3.hist(mse_attack[mse_attack < max_display], bins=100, alpha=0.7, label='Attack', color='red', density=True)
-ax3.axvline(threshold, color='black', linestyle='--', linewidth=2)
-ax3.set_xlabel('MSE')
-ax3.set_title(f'MSE Distribution (Zoom < {max_display:.2f})')
-ax3.legend()
-ax3.grid(True, alpha=0.3)
-
-# 4. 各攻擊類型 MSE
-ax4 = plt.subplot(3, 3, 4)
-attack_types = sorted(labels[labels != 'BENIGN'].unique())
-mse_by_type = [mse_benign] + [mse[labels == at] for at in attack_types]
-labels_plot = ['BENIGN'] + list(attack_types)
-bp = ax4.boxplot(mse_by_type, labels=labels_plot, patch_artist=True)
-ax4.axhline(threshold, color='red', linestyle='--', linewidth=2)
-ax4.set_ylabel('MSE')
-ax4.set_title('MSE by Type')
-ax4.set_xticklabels(labels_plot, rotation=45, ha='right')
-ax4.grid(True, alpha=0.3, axis='y')
-
-# 5. F1-Score 比較
-ax5 = plt.subplot(3, 3, 5)
-top10 = sorted(all_results, key=lambda x: x['f1'], reverse=True)[:10]
-names = [r['strategy'] for r in top10]
-f1s = [r['f1'] for r in top10]
-colors = ['gold' if r['strategy'] == best_strategy else 'steelblue' for r in top10]
-ax5.barh(names, f1s, color=colors)
-ax5.set_xlabel('F1-Score')
-ax5.set_title('Top 10 Strategies')
-ax5.grid(True, alpha=0.3, axis='x')
-
-# 6. 混淆矩陣
-ax6 = plt.subplot(3, 3, 6)
-cm = np.array([[best_results['tn'], best_results['fp']],
-               [best_results['fn'], best_results['tp']]])
-im = ax6.imshow(cm, cmap='Blues')
-ax6.set_xticks([0, 1])
-ax6.set_yticks([0, 1])
-ax6.set_xticklabels(['Pred Normal', 'Pred Attack'])
-ax6.set_yticklabels(['True Normal', 'True Attack'])
+# 混淆矩陣
+ax = axes[1, 0]
+cm = np.array([[best['tn'], best['fp']], [best['fn'], best['tp']]])
+im = ax.imshow(cm, cmap='Blues')
 for i in range(2):
     for j in range(2):
-        ax6.text(j, i, f'{cm[i, j]:,}', ha="center", va="center",
-                color="white" if cm[i, j] > cm.max()/2 else "black", fontweight='bold')
-ax6.set_title('Confusion Matrix')
-plt.colorbar(im, ax=ax6)
+        ax.text(j, i, f"{cm[i,j]:,}\n({cm[i,j]/cm.sum():.1%})",
+               ha='center', va='center',
+               color='white' if cm[i,j] > cm.max()/2 else 'black',
+               fontweight='bold')
+ax.set_xticks([0,1])
+ax.set_yticks([0,1])
+ax.set_xticklabels(['Normal', 'Attack'])
+ax.set_yticklabels(['Normal', 'Attack'])
+ax.set_title('Confusion Matrix')
 
-# 7-9. 其他圖表（簡化）
-ax7 = plt.subplot(3, 3, 7)
-ax7.text(0.5, 0.5, f'Detection Rate\n{best_results["detection_rate"]:.2%}',
-         ha='center', va='center', fontsize=20, fontweight='bold')
-ax7.axis('off')
-
-ax8 = plt.subplot(3, 3, 8)
-ax8.text(0.5, 0.5, f'Precision\n{best_results["precision"]:.4f}',
-         ha='center', va='center', fontsize=20, fontweight='bold')
-ax8.axis('off')
-
-ax9 = plt.subplot(3, 3, 9)
-ax9.text(0.5, 0.5, f'F1-Score\n{best_f1:.4f}',
-         ha='center', va='center', fontsize=20, fontweight='bold')
-ax9.axis('off')
+# F1
+ax = axes[1, 1]
+top10 = sorted(results, key=lambda x: x['f1'], reverse=True)[:10]
+names = [r['name'] for r in top10]
+f1s = [r['f1'] for r in top10]
+colors = ['gold' if r['name']==best['name'] else 'steelblue' for r in top10]
+ax.barh(names, f1s, color=colors)
+ax.set_xlabel('F1-Score')
+ax.set_title('Top Strategies')
+ax.grid(alpha=0.3, axis='x')
 
 plt.tight_layout()
-plt.savefig('autoencoder_final_analysis.png', dpi=150, bbox_inches='tight')
-print("📊 已保存分析圖: autoencoder_final_analysis.png")
-plt.show()
+plt.savefig('ae_v3.png', dpi=150)
+print(f"✅ ae_v3.png")
 
-print("\n" + "=" * 50)
-print("✅ 訓練完成！")
-print("=" * 50)
-print(f"  - 離群點移除: {outliers_removed} ({outlier_ratio:.2%})")
-print(f"  - 最終訓練樣本: {len(X_train)}")
-print(f"  - 最佳門檻: {best_threshold:.6f}")
-print(f"  - F1-Score: {best_f1:.4f}")
-print("=" * 50)
+print("\n" + "=" * 60)
+print("✅ 完成!")
+print("=" * 60)
+print(f"📊 訓練: {len(X_train):,} BENIGN, {epochs} epochs")
+print(f"✂️ 雙重裁剪: Winsorization + Post-scaling clip")
+print(f"🏆 {best['name']}: TPR={best['tpr']:.1%}, FPR={best['fpr']:.2%}")
+print(f"🎯 Precision={best['prec']:.3f}, F1={best['f1']:.3f}")
+print(f"📊 分離度: Mean={ratio_mean:.1f}x, Median={ratio_med:.1f}x")
+print("=" * 60)
