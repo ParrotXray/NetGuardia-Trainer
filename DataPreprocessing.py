@@ -5,7 +5,7 @@ from sklearn.ensemble import IsolationForest
 from pathlib import Path
 import ujson
 from dataclasses import dataclass
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 from Logger import Logger
 
 
@@ -92,8 +92,9 @@ class DataPreprocessing:
         self.log.info(f"Original feature dimension: {self.feature_matrix.shape}")
 
         self.feature_matrix = self.feature_matrix.replace([np.inf, -np.inf], np.nan)
-        self.feature_matrix = self.feature_matrix.fillna(0)
-        self.feature_matrix = self.feature_matrix.clip(-1e9, 1e9)
+        self.feature_matrix = self.feature_matrix.fillna(self.config.fill_value)
+        # self.feature_matrix = np.clip(self.feature_matrix, -1e9, 1e9)
+        self.feature_matrix = self.feature_matrix.clip(self.config.clip_min, self.config.clip_max)
         self.log.info(f"Cleaned feature dimensions: {self.feature_matrix.shape}")
 
     def anomaly_detection(self):
@@ -135,7 +136,7 @@ class DataPreprocessing:
 
         self.log.info("Saving processed data...")
 
-        output = self.feature_matrix.copy()
+        output: Dict[str, Any] = self.feature_matrix.copy()
         output['anomaly_if'] = self.detection_result['anomaly_if']
         output['Label'] = self.labels.values
 
