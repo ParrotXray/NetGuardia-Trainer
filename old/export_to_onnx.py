@@ -24,22 +24,22 @@ print("=" * 60)
 print("\n📦 載入模型和配置...")
 
 try:
-    deep_ae = tf.keras.models.load_model("deep_autoencoder.keras")
+    deep_ae = tf.keras.models.load_model("../deep_autoencoder.keras")
     print("✅ Deep Autoencoder 載入")
 except Exception as e:
     print(f"❌ 無法載入 Deep Autoencoder: {e}")
     exit(1)
 
 try:
-    rf = joblib.load("random_forest.pkl")
+    rf = joblib.load("../random_forest.pkl")
     print("✅ Random Forest 載入")
 except Exception as e:
     print(f"❌ 無法載入 Random Forest: {e}")
     exit(1)
 
 try:
-    mlp = tf.keras.models.load_model("mlp_improved.keras")
-    le = joblib.load("label_encoder_improved.pkl")
+    mlp = tf.keras.models.load_model("../mlp_improved.keras")
+    le = joblib.load("../label_encoder_improved.pkl")
     mlp_name = "mlp_improved"
     print("✅ MLP Improved 載入")
 except:
@@ -53,7 +53,7 @@ except:
         exit(1)
 
 try:
-    config = joblib.load("deep_ae_ensemble_config.pkl")
+    config = joblib.load("../deep_ae_ensemble_config.pkl")
     scaler = config['scaler']
     clip_params = config['clip_params']
     best_strategy = config['best']
@@ -89,11 +89,11 @@ model_proto, _ = tf2onnx.convert.from_keras(
     opset=13
 )
 
-onnx.save(model_proto, "deep_autoencoder.onnx")
+onnx.save(model_proto, "../deep_autoencoder.onnx")
 print("✅ 已儲存: deep_autoencoder.onnx")
 
 # 驗證
-onnx_model = onnx.load("deep_autoencoder.onnx")
+onnx_model = onnx.load("../deep_autoencoder.onnx")
 onnx.checker.check_model(onnx_model)
 print("✅ ONNX 模型驗證通過")
 
@@ -113,13 +113,13 @@ onx = convert_sklearn(
     target_opset=13
 )
 
-with open("random_forest.onnx", "wb") as f:
+with open("../random_forest.onnx", "wb") as f:
     f.write(onx.SerializeToString())
 
 print("✅ 已儲存: random_forest.onnx")
 
 # 驗證
-onnx_model = onnx.load("random_forest.onnx")
+onnx_model = onnx.load("../random_forest.onnx")
 onnx.checker.check_model(onnx_model)
 print("✅ ONNX 模型驗證通過")
 
@@ -252,7 +252,7 @@ config_json = {
 }
 
 # 儲存為 JSON
-with open("netguardia_config.json", "w", encoding='utf-8') as f:
+with open("../netguardia_config.json", "w", encoding='utf-8') as f:
     json.dump(config_json, f, indent=2, ensure_ascii=False)
 
 print("✅ 已儲存: netguardia_config.json")
@@ -271,7 +271,7 @@ inference_config = {
     "feature_names": scaler_params["feature_names"]
 }
 
-with open("netguardia_inference.json", "w", encoding='utf-8') as f:
+with open("../netguardia_inference.json", "w", encoding='utf-8') as f:
     json.dump(inference_config, f, indent=2, ensure_ascii=False)
 
 print("✅ 已儲存: netguardia_inference.json (精簡版)")
@@ -303,14 +303,14 @@ test_input_scaled = np.clip(test_input_scaled, -5, 5).astype(np.float32)
 
 # 測試 Deep AE
 print("\n1. 測試 Deep Autoencoder...")
-session_ae = ort.InferenceSession("deep_autoencoder.onnx")
+session_ae = ort.InferenceSession("../deep_autoencoder.onnx")
 ae_output = session_ae.run(None, {"input": test_input_scaled})[0]
 ae_mse = np.mean((test_input_scaled - ae_output) ** 2)
 print(f"   ✅ AE MSE: {ae_mse:.6f}")
 
 # 測試 RF
 print("\n2. 測試 Random Forest...")
-session_rf = ort.InferenceSession("random_forest.onnx")
+session_rf = ort.InferenceSession("../random_forest.onnx")
 rf_output = session_rf.run(None, {"float_input": test_input_scaled})
 rf_proba = rf_output[1][0][1]  # probabilities, attack class
 print(f"   ✅ RF Attack Probability: {rf_proba:.6f}")

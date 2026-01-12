@@ -1,9 +1,3 @@
-"""
-CIC-IDS2017 資料集完整預處理流程
-1. 載入並合併所有 CSV 檔案
-2. 使用 IsolationForest 進行初步異常標記
-3. 輸出處理後的資料供 Autoencoder 使用
-"""
 import joblib
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
@@ -13,7 +7,7 @@ from pathlib import Path
 import os
 
 print("=" * 60)
-print("🚀 CIC-IDS2017 資料集預處理流程")
+print("CIC-IDS2017 資料集預處理流程")
 print("=" * 60)
 
 # ============================================================
@@ -34,10 +28,10 @@ file_paths = [
 ]
 
 datasets = []
-for filename in os.listdir("./csv"):
+for filename in os.listdir("../csv"):
     try:
         print(f"  載入: {filename}")
-        df = pd.read_csv(f"./csv/{filename}")
+        df = pd.read_csv(f"./csv/{filename}", encoding='utf-8', encoding_errors='replace')
         df.columns = df.columns.str.strip()  # 清理欄位名稱
         datasets.append(df)
         print(f"       ✓ 形狀: {df.shape}, 標籤: {df['Label'].nunique()} 類")
@@ -54,17 +48,18 @@ if not datasets:
 # ============================================================
 print("\n🔗 Step 2: 合併資料集...")
 df_combined = pd.concat(datasets, ignore_index=True)
+
+# 保留標籤
+labels = df_combined['Label'].str.replace('�', '-', regex=False).copy()
+
 print(f"✅ 合併後資料: {df_combined.shape}")
 print(f"\n📊 標籤分布:")
-print(df_combined['Label'].value_counts())
+print(labels.value_counts())
 
 # ============================================================
 # Step 3: 特徵準備
 # ============================================================
 print("\n🛠️  Step 3: 特徵準備...")
-
-# 保留標籤
-labels = df_combined['Label'].copy()
 
 # 移除非特徵欄位
 non_feature_cols = ['Flow ID', 'Source IP', 'Destination IP', 'Timestamp', 'Label']
@@ -118,7 +113,7 @@ output['anomaly_if'] = anomaly_if
 output['Label'] = labels.values
 
 # 儲存主要輸出檔案
-output_path = "output_anomaly.csv"
+output_path = "../output_anomaly.csv"
 output.to_csv(output_path, index=False)
 print(f"  ✅ 已儲存: {output_path}")
 
@@ -132,12 +127,12 @@ stats = {
 }
 
 import json
-with open('preprocessing_stats.json', 'w', encoding='utf-8') as f:
+with open('../preprocessing_stats.json', 'w', encoding='utf-8') as f:
     json.dump(stats, f, indent=2, ensure_ascii=False)
 print(f"  ✅ 已儲存統計: preprocessing_stats.json")
 
 # 選擇性儲存模型
-model_path = "isolation_forest_model.joblib"
+model_path = "../isolation_forest_model.joblib"
 joblib.dump(clf, model_path)
 print(f"  ✅ 已儲存模型: {model_path}")
 

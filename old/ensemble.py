@@ -28,7 +28,7 @@ print(f"GPU: {tf.config.list_physical_devices('GPU')}")
 
 # === 1️⃣ 載入資料 ===
 print("\n📂 載入資料...")
-df = pd.read_csv("output_anomaly.csv")
+df = pd.read_csv("../output_anomaly.csv")
 df.columns = df.columns.str.strip()
 labels = df['Label'].copy()
 
@@ -412,7 +412,7 @@ output.to_csv("output_deep_ae_ensemble.csv", index=False)
 print(f"✅ output_deep_ae_ensemble.csv")
 
 deep_ae.save("deep_autoencoder.keras")
-joblib.dump(rf, "random_forest.pkl")
+joblib.dump(rf, "../random_forest.pkl")
 joblib.dump({
     'scaler': scaler,
     'clip_params': clip_params,
@@ -420,7 +420,7 @@ joblib.dump({
     'results': results,
     'encoding_dim': encoding_dim,
     'ae_normalization': ae_normalization_params  # 🔥 新增
-}, "deep_ae_ensemble_config.pkl")
+}, "../deep_ae_ensemble_config.pkl")
 print(f"✅ deep_autoencoder.keras, random_forest.pkl, deep_ae_ensemble_config.pkl")
 
 print(f"\n📊 配置檔包含:")

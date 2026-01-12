@@ -20,10 +20,10 @@ print("=" * 60)
 
 # === 1️⃣ 載入資料 ===
 print("\n📂 載入資料...")
-df = pd.read_csv("output_deep_ae_ensemble.csv")
+df = pd.read_csv("../output_deep_ae_ensemble.csv")
 df.columns = df.columns.str.strip()
 
-config = joblib.load("deep_ae_ensemble_config.pkl")
+config = joblib.load("../deep_ae_ensemble_config.pkl")
 scaler = config['scaler']
 clip_params = config['clip_params']
 
@@ -290,7 +290,7 @@ except:
 print("\n💾 儲存改進版模型...")
 
 mlp_improved.save("mlp_improved.keras")
-joblib.dump(encoder, "label_encoder_improved.pkl")
+joblib.dump(encoder, "../label_encoder_improved.pkl")
 
 config_improved = {
     'encoder': encoder,
@@ -301,7 +301,7 @@ config_improved = {
     'test_accuracy': acc,
     'test_loss': loss
 }
-joblib.dump(config_improved, "mlp_improved_config.pkl")
+joblib.dump(config_improved, "../mlp_improved_config.pkl")
 
 print("✅ 已保存:")
 print("  - mlp_improved.keras")

@@ -24,7 +24,7 @@ print(f"TensorFlow: {tf.__version__}")
 print(f"GPU: {tf.config.list_physical_devices('GPU')}")
 
 # === 1️⃣ 載入 ===
-df = pd.read_csv("output_anomaly.csv")
+df = pd.read_csv("../output_anomaly.csv")
 df.columns = df.columns.str.strip()
 print(f"\n✅ 資料: {df.shape}")
 
