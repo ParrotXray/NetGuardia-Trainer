@@ -17,8 +17,8 @@ from pathlib import Path
 from tensorflow import keras
 import seaborn as sns
 import joblib
-from src.utils.Logger import Logger
-from src.model.MLPConfig import MLPConfig
+from utils import Logger
+from model import MLPConfig
 from typing import List, Optional, Dict, Any, Tuple
 
 
@@ -65,7 +65,9 @@ class MLP:
         self.raw_data = pd.read_csv("./outputs/deep_ae_ensemble.csv")
         self.raw_data.columns = self.raw_data.columns.str.strip()
 
-        self.log.info(f"Loading preprocessing config from artifacts/deep_ae_ensemble_config.pkl...")
+        self.log.info(
+            f"Loading preprocessing config from artifacts/deep_ae_ensemble_config.pkl..."
+        )
         ensemble_config = joblib.load("./artifacts/deep_ae_ensemble_config.pkl")
         self.scaler = ensemble_config["scaler"]
         self.clip_params = ensemble_config["clip_params"]
@@ -281,7 +283,11 @@ class MLP:
     def save_results(self) -> None:
         self.log.info("Saving results...")
 
-        if not (os.path.exists("./metadata") or os.path.exists("./artifacts") or os.path.exists("./outputs")):
+        if not (
+            os.path.exists("./metadata")
+            or os.path.exists("./artifacts")
+            or os.path.exists("./outputs")
+        ):
             os.makedirs("./metadata", exist_ok=True)
             os.makedirs("./artifacts", exist_ok=True)
             os.makedirs("./outputs", exist_ok=True)

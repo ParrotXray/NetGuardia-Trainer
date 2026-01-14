@@ -7,12 +7,12 @@ from sklearn.ensemble import IsolationForest
 from pathlib import Path
 import ujson
 from typing import List, Optional, Dict, Any
-from src.utils.Logger import Logger
-from src.model.PreprocessingConfig import PreprocessingConfig
+from utils import Logger
+from model import PreprocessConfig
 
 
-class DataPreprocessing:
-    def __init__(self, config: Optional[PreprocessingConfig] = None) -> None:
+class DataPreprocess:
+    def __init__(self, config: Optional[PreprocessConfig] = None) -> None:
 
         self.datasets: List[pd.DataFrame] = []
         self.combined_data: Optional[pd.DataFrame] = None
@@ -22,9 +22,9 @@ class DataPreprocessing:
         self.clf: Optional[IsolationForest] = None
         self.detection_result: Optional[Dict[str, Any]] = None
 
-        self.config: Optional[PreprocessingConfig] = config or PreprocessingConfig()
+        self.config: Optional[PreprocessConfig] = config or PreprocessConfig()
 
-        self.log: Logger = Logger("DataPreprocessing")
+        self.log: Logger = Logger("DataPreprocess")
 
     def load_dataset(self, file: str) -> None:
         try:
@@ -65,7 +65,9 @@ class DataPreprocessing:
             self.combined_data["Label"].str.replace("�", "-", regex=False).copy()
         )
         self.log.info(f"Combined data: {self.combined_data.shape}")
-        self.log.info(f"Tag distribution:\n{self.labels.value_counts()}")
+
+        print("Tag distribution:")
+        print(self.labels.value_counts())
 
     def feature_preparation(self) -> None:
         if self.combined_data is None:
@@ -137,7 +139,11 @@ class DataPreprocessing:
 
         self.log.info("Saving processed data...")
 
-        if not (os.path.exists("./metadata") or os.path.exists("./artifacts") or os.path.exists("./outputs")):
+        if not (
+            os.path.exists("./metadata")
+            or os.path.exists("./artifacts")
+            or os.path.exists("./outputs")
+        ):
             os.makedirs("./metadata", exist_ok=True)
             os.makedirs("./artifacts", exist_ok=True)
             os.makedirs("./outputs", exist_ok=True)

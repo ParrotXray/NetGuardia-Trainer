@@ -1,14 +1,12 @@
-from components.DataPreprocessing import DataPreprocessing
-from components.DeepAutoencoder import DeepAutoencoder
-from components.MLP import MLP
-from utils.Logger import Logger
+from components import DataPreprocess, DeepAutoencoder, MLP, Exporter
+from utils import Logger
 import time
 
 if __name__ == "__main__":
     log = Logger("Main")
 
     log.info("Start processing data...")
-    dp = DataPreprocessing()
+    dp = DataPreprocess()
     dp.load_datasets("./raw_data")
     dp.merge_dataset()
     dp.feature_preparation()
@@ -48,3 +46,16 @@ if __name__ == "__main__":
     mlp.evaluate_model()
     mlp.save_results()
     mlp.generate_visualizations()
+
+    time.sleep(3)
+
+    log.info("Export models to onnx...")
+    ep = Exporter()
+    ep.load_models()
+    ep.export_deep_ae_onnx()
+    ep.export_rf_onnx()
+    ep.export_mlp_onnx()
+    ep.build_config_json()
+    ep.save_config_json()
+    ep.verify_onnx_models()
+    ep.print_summary()

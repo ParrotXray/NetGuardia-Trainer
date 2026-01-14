@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 
 @dataclass
-class PreprocessingConfig:
+class PreprocessConfig:
     contamination_rate: float = 0.05
     random_state: int = 42
     n_jobs: int = -1
