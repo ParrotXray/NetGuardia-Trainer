@@ -137,6 +137,7 @@ class Exporter:
             self.rf_model,
             initial_types=initial_type,
             target_opset=self.config.opset_version,
+            options={id(self.rf_model): {'zipmap': False}}
         )
 
         self.rf_onnx_path = Path("exports") / "random_forest.onnx"
@@ -169,6 +170,10 @@ class Exporter:
         onnx_model = onnx.load(self.mlp_onnx_path)
         onnx.checker.check_model(onnx_model)
         self.log.info("ONNX model validation passed")
+
+        print("\nRandom Forest ONNX outputs:")
+        for output in onnx_model.graph.output:
+            print(f"  {output.name}: {output.type}")
 
     def build_config_json(self) -> None:
         self.log.info("Building configuration JSON...")
@@ -330,8 +335,17 @@ class Exporter:
         print("Testing Random Forest:")
         session_rf = ort.InferenceSession(str(self.rf_onnx_path))
         rf_output = session_rf.run(None, {"float_input": test_input_scaled})
-        rf_proba = rf_output[1][0][1]
+        rf_label = rf_output[0][0]  # output_label: [batch] -> scalar
+        rf_proba_matrix = rf_output[1]  # output_probability: [batch, n_classes]
+
+        if rf_proba_matrix.shape[1] > 1:
+            rf_proba = rf_proba_matrix[0][1] if rf_proba_matrix.shape[1] == 2 else np.max(rf_proba_matrix[0])
+        else:
+            rf_proba = rf_proba_matrix[0][0]
+
+        print(f"RF Predicted Label: {rf_label}")
         print(f"RF Attack Probability: {rf_proba:.6f}")
+        print(f"RF Probability Distribution: {rf_proba_matrix[0]}")
 
         print()
         print("Testing MLP Classifier:")
