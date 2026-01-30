@@ -20,7 +20,8 @@ import matplotlib.pyplot as plt
 
 class DeepAutoencoder:
     def __init__(self, config: Optional[DeepAutoencoderConfig] = None) -> None:
-        self.raw_data: Optional[pd.DataFrame] = None
+        self.benign_data: Optional[pd.DataFrame] = None
+        self.attack_data: Optional[pd.DataFrame] = None
         self.labels: Optional[pd.Series] = None
 
         self.features: Optional[pd.DataFrame] = None
@@ -59,28 +60,38 @@ class DeepAutoencoder:
         self.log.info(f"GPU: {gpus if gpus else 'No GPU detected'}")
 
     def load_data(self) -> None:
-        self.log.info(f"Loading data from outputs/preprocessing.csv...")
-        self.raw_data = pd.read_csv("./outputs/preprocessing.csv")
-        self.raw_data.columns = self.raw_data.columns.str.strip()
-        self.labels = self.raw_data["Label"].copy()
+        self.log.info("Loading data from outputs/preprocessing_benign.csv...")
+        self.benign_data = pd.read_csv("./outputs/preprocessing_benign.csv")
+        self.benign_data.columns = self.benign_data.columns.str.strip()
 
-        benign_count = (self.labels == "BENIGN").sum()
-        attack_count = (self.labels != "BENIGN").sum()
+        self.log.info("Loading data from outputs/preprocessing_attack.csv...")
+        self.attack_data = pd.read_csv("./outputs/preprocessing_attack.csv")
+        self.attack_data.columns = self.attack_data.columns.str.strip()
 
-        print(f"Total samples: {len(self.raw_data):,}")
-        print(f"BENIGN: {benign_count:,}")
-        print(f"Attack: {attack_count:,}")
+        print(f"BENIGN samples: {len(self.benign_data):,}")
+        print(f"Attack samples: {len(self.attack_data):,}")
 
     def prepare_data(self) -> None:
         self.log.info("Preparing data...")
 
         exclude_cols = ["Label", "anomaly_if"]
-        self.features = self.raw_data.drop(columns=exclude_cols, errors="ignore")
-        self.features = self.features.select_dtypes(include=[np.number])
 
+        self.benign_features = self.benign_data.drop(
+            columns=exclude_cols, errors="ignore"
+        ).select_dtypes(include=[np.number])
+
+        attack_features = self.attack_data.drop(
+            columns=exclude_cols, errors="ignore"
+        ).select_dtypes(include=[np.number])
+
+        self.features = pd.concat(
+            [self.benign_features, attack_features], ignore_index=True
+        )
+        self.labels = pd.concat(
+            [self.benign_data["Label"], self.attack_data["Label"]], ignore_index=True
+        )
         self.binary_labels = (self.labels != "BENIGN").astype(int)
 
-        self.benign_features = self.features[self.binary_labels == 0].copy()
         self.test_features = self.features.copy()
         self.test_labels = self.binary_labels.copy()
 
@@ -429,7 +440,8 @@ class DeepAutoencoder:
     def evaluate_attack_types(self) -> None:
         self.log.info("Attack type detection rates...")
 
-        for attack_type in sorted(self.labels[self.labels != "BENIGN"].unique()):
+        attack_labels = self.labels[(self.labels != "BENIGN") & (self.labels.notna())]
+        for attack_type in sorted(attack_labels.unique()):
             mask = self.labels == attack_type
             detected = (
                 self.best_strategy["score"][mask] > self.best_strategy["threshold"]
@@ -458,8 +470,18 @@ class DeepAutoencoder:
         ).astype(int)
         output["Label"] = self.labels.values
 
+        attack_anomaly_mask = (output["ensemble_anomaly"] == 1) & (
+            output["Label"] != "BENIGN"
+        )
+        output_filtered = output[attack_anomaly_mask]
+
+        self.log.info(
+            f"Filtered: {len(output_filtered):,} attack anomalies "
+            f"(from {len(output):,} total samples)"
+        )
+
         output_path = Path("outputs") / "deep_ae_ensemble.csv"
-        output.to_csv(output_path, index=False)
+        output_filtered.to_csv(output_path, index=False)
         self.log.info(f"Saved: {output_path}")
 
         model_ae_path = Path("artifacts") / "deep_autoencoder.keras"

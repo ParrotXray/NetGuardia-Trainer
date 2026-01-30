@@ -72,6 +72,7 @@ class DataPreprocess:
             "Infiltration": "Web Attack",
             "Heartbleed": "DoS Slowhttptest",
         }
+
         self.labels = self.labels.replace(web_attack_mapping)
 
         self.log.info(f"Combined data: {self.combined_data.shape}")
@@ -83,26 +84,58 @@ class DataPreprocess:
         if self.combined_data is None:
             raise ValueError("No combined data available. Call merge_dataset() first!")
 
-        self.log.info(f"Feature preparation...")
-        non_feature_cols = [
-            "Flow ID",
-            "Source IP",
-            "Destination IP",
-            "Timestamp",
-            "Label",
-        ]
-        df_features = self.combined_data.drop(columns=non_feature_cols, errors="ignore")
+        self.log.info("Feature preparation...")
 
-        self.feature_matrix = df_features.select_dtypes(include=[np.number])
-        self.log.info(f"Original feature dimension: {self.feature_matrix.shape}")
+        selected_features = [
+            # 最重要 (Rank 1-5)
+            "Destination Port",
+            "Protocol",
+            "Flow Duration",
+            "Total Fwd Packets",
+            "Total Backward Packets",
+            "Total Length of Fwd Packets",
+            # 重要 (Rank 6-10)
+            "Total Length of Bwd Packets",
+            "Flow Bytes/s",
+            "Flow Packets/s",
+            "Fwd Packet Length Mean",
+            "Bwd Packet Length Mean",
+            # 次要重要 (Rank 11-20)
+            "Flow IAT Mean",
+            "Fwd IAT Mean",
+            "Bwd IAT Mean",
+            "Fwd PSH Flags",
+            "Bwd PSH Flags",
+            "FIN Flag Count",
+            "SYN Flag Count",
+            "RST Flag Count",
+            "ACK Flag Count",
+            "Init_Win_bytes_forward",
+            "Init_Win_bytes_backward",
+            "min_seg_size_forward",
+            "Packet Length Mean",
+            "Packet Length Std",
+            "Avg Fwd Segment Size",
+            "Avg Bwd Segment Size",
+        ]
+
+        available_features = [
+            f for f in selected_features if f in self.combined_data.columns
+        ]
+        missing_features = set(selected_features) - set(available_features)
+
+        if missing_features:
+            self.log.warning(f"Missing features: {missing_features}")
+
+        self.feature_matrix = self.combined_data[available_features].copy()
+        self.log.info(f"Selected {len(available_features)} features")
 
         self.feature_matrix = self.feature_matrix.replace([np.inf, -np.inf], np.nan)
         self.feature_matrix = self.feature_matrix.fillna(self.config.fill_value)
-        # self.feature_matrix = np.clip(self.feature_matrix, -1e9, 1e9)
         self.feature_matrix = self.feature_matrix.clip(
             self.config.clip_min, self.config.clip_max
         )
-        self.log.info(f"Cleaned feature dimensions: {self.feature_matrix.shape}")
+        self.log.info(f"Feature matrix shape: {self.feature_matrix.shape}")
 
     def anomaly_detection(self):
         if self.feature_matrix is None:
@@ -153,13 +186,30 @@ class DataPreprocess:
         os.makedirs("./artifacts", exist_ok=True)
         os.makedirs("./outputs", exist_ok=True)
 
-        output: Dict[str, Any] = self.feature_matrix.copy()
+        output: pd.DataFrame = self.feature_matrix.copy()
         output["anomaly_if"] = self.detection_result["anomaly_if"]
         output["Label"] = self.labels.values
 
-        output_path = Path("outputs") / "preprocessing.csv"
-        output.to_csv(output_path, index=False)
-        self.log.info(f"save: {output_path}")
+        invalid_labels = ["Unknown", "0", "", "nan"]
+        benign_mask = output["Label"] == "BENIGN"
+        attack_mask = (output["Label"] != "BENIGN") & (
+            ~output["Label"].isin(invalid_labels)
+        )
+        output_benign = output[benign_mask]
+        output_attack = output[attack_mask]
+
+        dropped_count = len(output) - len(output_benign) - len(output_attack)
+        if dropped_count > 0:
+            self.log.warning(f"Dropped {dropped_count:,} rows with invalid labels")
+
+        benign_path = Path("outputs") / "preprocessing_benign.csv"
+        attack_path = Path("outputs") / "preprocessing_attack.csv"
+
+        output_benign.to_csv(benign_path, index=False)
+        output_attack.to_csv(attack_path, index=False)
+
+        self.log.info(f"BENIGN samples: {len(output_benign):,} -> {benign_path}")
+        self.log.info(f"Attack samples: {len(output_attack):,} -> {attack_path}")
 
         stats = {
             "total_samples": len(self.combined_data),
