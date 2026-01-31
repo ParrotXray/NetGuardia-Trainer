@@ -12,6 +12,9 @@ if __name__ == "__main__":
     start = time.perf_counter()
 
     parser = argparse.ArgumentParser(description="Training net-guardia models")
+
+    parser.add_argument('year', help='Select Dataset year')
+
     parser.add_argument("-a", "--all", action="store_true", help="ALL")
     parser.add_argument(
         "-dp", "--datapreprocess", action="store_true", help="DataPreprocess"
@@ -32,7 +35,7 @@ if __name__ == "__main__":
         dp = DataPreprocess()
         dp.load_datasets("./raw_data")
         dp.merge_dataset()
-        dp.feature_preparation()
+        dp.feature_preparation(args.year)
         dp.output_result()
 
         time.sleep(3)

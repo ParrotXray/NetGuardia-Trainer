@@ -248,12 +248,19 @@ class DeepAutoencoder:
     def predict_autoencoder(self) -> None:
         self.log.info("Calculating Deep AE anomaly scores...")
 
-        predictions = self.autoencoder_model.predict(
-            self.test_features_scaled, batch_size=2048, verbose=1
-        )
-        self.ae_mse_scores = np.mean(
-            np.square(self.test_features_scaled - predictions), axis=1
-        )
+        batch_size = 2048
+        n_samples = len(self.test_features_scaled)
+        self.ae_mse_scores = np.zeros(n_samples, dtype=np.float32)
+
+        for start in range(0, n_samples, batch_size):
+            end = min(start + batch_size, n_samples)
+            batch_data = self.test_features_scaled[start:end]
+            batch_pred = self.autoencoder_model.predict(batch_data, verbose=0)
+            self.ae_mse_scores[start:end] = np.mean(
+                np.square(batch_data - batch_pred), axis=1
+            )
+            if (start // batch_size) % 500 == 0:
+                print(f"Progress: {end:,}/{n_samples:,} ({end/n_samples*100:.1f}%)")
 
         ae_mse_benign = self.ae_mse_scores[self.test_labels == 0]
         ae_mse_attack = self.ae_mse_scores[self.test_labels == 1]
