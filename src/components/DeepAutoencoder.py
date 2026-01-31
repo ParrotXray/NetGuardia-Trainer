@@ -90,7 +90,7 @@ class DeepAutoencoder:
         self.labels = pd.concat(
             [self.benign_data["Label"], self.attack_data["Label"]], ignore_index=True
         )
-        self.binary_labels = ((self.labels != "BENIGN") | (self.labels != "Benign")).astype(int)
+        self.binary_labels = (~self.labels.isin(["BENIGN", "Benign"])).astype(int)
 
         self.test_features = self.features.copy()
         self.test_labels = self.binary_labels.copy()
@@ -391,7 +391,12 @@ class DeepAutoencoder:
 
                 estimate_fpr_limit = ((100 - percentile) / 100) * 1.5
 
-                if f1 > best_f1 and prec > 0.5 and fpr < estimate_fpr_limit and tpr > 0.90:
+                if (
+                    f1 > best_f1
+                    and prec > 0.5
+                    and fpr < estimate_fpr_limit
+                    and tpr > 0.90
+                ):
                     # self.log.info(f"Strict selection criteria: {fpr}, {tpr}")
                     best_f1 = f1
                     best_threshold = threshold
@@ -447,7 +452,10 @@ class DeepAutoencoder:
     def evaluate_attack_types(self) -> None:
         self.log.info("Attack type detection rates...")
 
-        attack_labels = self.labels[(self.labels != "BENIGN") | (self.labels != "Benign") & (self.labels.notna())]
+        attack_labels = self.labels[
+            ~self.labels.isin(["BENIGN", "Benign"]) & (self.labels.notna())
+        ]
+
         for attack_type in sorted(attack_labels.unique()):
             mask = self.labels == attack_type
             detected = (
@@ -478,8 +486,9 @@ class DeepAutoencoder:
         output["Label"] = self.labels.values
 
         attack_anomaly_mask = (output["ensemble_anomaly"] == 1) & (
-            (output["Label"] != "BENIGN") | (output["Label"] != "Benign")
+            ~output["Label"].isin(["BENIGN", "Benign"])
         )
+
         output_filtered = output[attack_anomaly_mask]
 
         self.log.info(

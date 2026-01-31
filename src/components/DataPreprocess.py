@@ -7,10 +7,11 @@ import ujson
 from typing import List, Optional, Dict, Any
 from utils import Logger
 from model import PreprocessConfig
+from model import UnsupportedDatasetError
 
 
 class DataPreprocess:
-    def __init__(self, config: Optional[PreprocessConfig] = None) -> None:
+    def __init__(self, year: str, config: Optional[PreprocessConfig] = None) -> None:
 
         self.datasets: List[pd.DataFrame] = []
         self.combined_data: Optional[pd.DataFrame] = None
@@ -19,6 +20,7 @@ class DataPreprocess:
 
         self.config: Optional[PreprocessConfig] = config or PreprocessConfig()
 
+        self.year: int = year
         self.log: Logger = Logger("DataPreprocess")
 
     def load_dataset(self, file: str) -> None:
@@ -33,7 +35,15 @@ class DataPreprocess:
         except Exception as e:
             self.log.error(f"Error: {e}")
 
-    def load_datasets(self, csv_dir: str) -> None:
+    def load_datasets(self) -> None:
+        if self.year not in ["2017", "2018"]:
+            raise UnsupportedDatasetError(
+                f"Unsupported dataset year: {self.year}. "
+                f"Only 2017 and 2018 are supported."
+            )
+
+        csv_dir = "./rawdata/2017" if self.year == "2017" else "./rawdata/2018"
+
         self.log.info(f"Loading datasets from {csv_dir}...")
 
         csv_files = list(Path(csv_dir).glob("*.csv"))
@@ -66,7 +76,6 @@ class DataPreprocess:
             "Web Attack - XSS": "Web Attack",
             "Infiltration": "Web Attack",
             "Heartbleed": "DoS Slowhttptest",
-
             "Brute Force -Web": "Web Attack",
             "Brute Force -XSS": "Web Attack",
             "SQL Injection": "Web Attack",
@@ -79,20 +88,21 @@ class DataPreprocess:
         print("Tag distribution:")
         print(self.labels.value_counts())
 
-    def feature_preparation(self, year: int) -> None:
+    def feature_preparation(self) -> None:
         if self.combined_data is None:
             raise ValueError("No combined data available. Call merge_dataset() first!")
 
         self.log.info("Feature preparation...")
 
-        if year not in [2017, 2018]:
-            raise ValueError(
-                f"Unsupported dataset year: {year}. "
+        if self.year not in ["2017", "2018"]:
+            raise UnsupportedDatasetError(
+                f"Unsupported dataset year: {self.year}. "
                 f"Only 2017 and 2018 are supported."
             )
 
         selected_features = (
-            self.config.cic_2017_selected_features if year == 2017
+            self.config.cic_2017_selected_features
+            if self.year == "2017"
             else self.config.cic_2018_selected_features
         )
 
@@ -130,9 +140,7 @@ class DataPreprocess:
 
         invalid_labels = ["Unknown", "0", "", "nan"]
         benign_mask = (output["Label"] == "BENIGN") | (output["Label"] == "Benign")
-        attack_mask = (output["Label"] != "BENIGN") | (output["Label"] != "Benign") & (
-            ~output["Label"].isin(invalid_labels)
-        )
+        attack_mask = ~benign_mask & (~output["Label"].isin(invalid_labels))
         output_benign = output[benign_mask]
         output_attack = output[attack_mask]
 
