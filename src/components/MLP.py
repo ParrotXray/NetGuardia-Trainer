@@ -2,24 +2,130 @@ import os
 
 import pandas as pd
 import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+import lightning as L
+from lightning.pytorch.loggers import CSVLogger
+from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.utils.class_weight import compute_class_weight
 from imblearn.over_sampling import SMOTE
-from tensorflow.keras.models import Sequential
-from tensorflow.keras import layers, models
-from tensorflow.keras.layers import Dense, Dropout, Input, BatchNormalization
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
-from tensorflow.keras.optimizers import Adam
 import matplotlib.pyplot as plt
 from pathlib import Path
-from tensorflow import keras
 import seaborn as sns
 import joblib
 from utils import Logger
 from model import MLPConfig
 from typing import List, Optional, Dict, Any, Tuple
+
+
+class MLPModel(nn.Module):
+    """PyTorch MLP Classifier Model"""
+
+    def __init__(
+        self,
+        input_dim: int,
+        n_classes: int,
+        layer_sizes: List[int],
+        dropout_rates: List[float],
+    ):
+        super().__init__()
+        self.input_dim = input_dim
+        self.n_classes = n_classes
+
+        layers = []
+        prev_size = input_dim
+        for size, dropout in zip(layer_sizes, dropout_rates):
+            layers.append(nn.Linear(prev_size, size))
+            layers.append(nn.BatchNorm1d(size))
+            layers.append(nn.ReLU())
+            if dropout > 0:
+                layers.append(nn.Dropout(dropout))
+            prev_size = size
+
+        # Output layer
+        layers.append(nn.Linear(prev_size, n_classes))
+        self.network = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.network(x)
+
+
+class MLPLightningModule(L.LightningModule):
+    """PyTorch Lightning Module for MLP Training"""
+
+    def __init__(
+        self,
+        model: MLPModel,
+        learning_rate: float = 0.001,
+        class_weights: Optional[torch.Tensor] = None,
+        reduce_lr_factor: float = 0.5,
+        reduce_lr_patience: int = 7,
+        min_lr: float = 1e-7,
+    ):
+        super().__init__()
+        self.model = model
+        self.learning_rate = learning_rate
+        self.reduce_lr_factor = reduce_lr_factor
+        self.reduce_lr_patience = reduce_lr_patience
+        self.min_lr = min_lr
+
+        if class_weights is not None:
+            self.loss_fn = nn.CrossEntropyLoss(weight=class_weights)
+        else:
+            self.loss_fn = nn.CrossEntropyLoss()
+
+        self.save_hyperparameters(ignore=["model", "class_weights"])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+    def training_step(self, batch, batch_idx):
+        x, y = batch
+        logits = self(x)
+        loss = self.loss_fn(logits, y)
+        preds = torch.argmax(logits, dim=1)
+        acc = (preds == y).float().mean()
+
+        self.log("train_loss", loss, prog_bar=True, on_step=False, on_epoch=True)
+        self.log("train_acc", acc, prog_bar=True, on_step=False, on_epoch=True)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        x, y = batch
+        logits = self(x)
+        loss = self.loss_fn(logits, y)
+        preds = torch.argmax(logits, dim=1)
+        acc = (preds == y).float().mean()
+
+        self.log("val_loss", loss, prog_bar=True, on_step=False, on_epoch=True)
+        self.log("val_acc", acc, prog_bar=True, on_step=False, on_epoch=True)
+        return loss
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(
+            self.parameters(),
+            lr=self.learning_rate,
+        )
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="max",
+            factor=self.reduce_lr_factor,
+            patience=self.reduce_lr_patience,
+            min_lr=self.min_lr,
+        )
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "monitor": "val_acc",
+                "interval": "epoch",
+                "frequency": 1,
+            },
+        }
 
 
 class MLP:
@@ -47,10 +153,12 @@ class MLP:
         self.train_labels_balanced: Optional[np.ndarray] = None
 
         self.class_weights: Optional[Dict[int, float]] = None
+        self.class_weights_tensor: Optional[torch.Tensor] = None
 
-        self.mlp_model: Optional[keras.Model] = None
+        self.mlp_model: Optional[MLPModel] = None
+        self.lightning_module: Optional[MLPLightningModule] = None
 
-        self.training_history: Optional[keras.callbacks.History] = None
+        self.training_history: Optional[Dict[str, List[float]]] = None
 
         self.test_loss: Optional[float] = None
         self.test_accuracy: Optional[float] = None
@@ -59,6 +167,9 @@ class MLP:
         self.config: MLPConfig = config or MLPConfig()
 
         self.log: Logger = Logger("MLP")
+
+        # Device configuration
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def load_data(self) -> None:
         self.log.info("Loading data from outputs/deep_ae_ensemble.csv...")
@@ -257,6 +368,7 @@ class MLP:
             y=self.train_labels_balanced,
         )
         self.class_weights = dict(enumerate(class_weights_array))
+        self.class_weights_tensor = torch.FloatTensor(class_weights_array)
 
         print("Class weights (first 10):")
         for idx in range(min(10, len(class_weights_array))):
@@ -265,93 +377,129 @@ class MLP:
             print(f"{label:<35} {weight:.4f}")
 
     def build_model(self) -> None:
-        self.log.info("Building Improved MLP model...")
+        self.log.info("Building Improved MLP model with PyTorch...")
 
         n_classes = len(self.label_encoder.classes_)
         input_dim = self.train_features_balanced.shape[1]
 
-        inputs = layers.Input(shape=(input_dim,), name="input")
-
-        x = inputs
-
-        for i, (size, dropout) in enumerate(
-            zip(self.config.layer_sizes, self.config.dropout_rates)
-        ):
-            x = layers.Dense(size, activation="relu")(x)
-            x = layers.BatchNormalization()(x)
-            if dropout > 0:
-                x = layers.Dropout(dropout)(x)
-
-        outputs = layers.Dense(n_classes, activation="softmax", name="output")(x)
-
-        self.mlp_model = models.Model(
-            inputs=inputs, outputs=outputs, name="mlp_improved"
+        self.mlp_model = MLPModel(
+            input_dim=input_dim,
+            n_classes=n_classes,
+            layer_sizes=self.config.layer_sizes,
+            dropout_rates=self.config.dropout_rates,
         )
 
-        self.mlp_model.compile(
-            optimizer=Adam(learning_rate=self.config.learning_rate),
-            loss="sparse_categorical_crossentropy",
-            metrics=["accuracy"],
+        self.lightning_module = MLPLightningModule(
+            model=self.mlp_model,
+            learning_rate=self.config.learning_rate,
+            class_weights=self.class_weights_tensor.to(self.device) if self.class_weights_tensor is not None else None,
+            reduce_lr_factor=self.config.reduce_lr_factor,
+            reduce_lr_patience=self.config.reduce_lr_patience,
+            min_lr=self.config.min_lr,
         )
 
-        self.log.info(f"Total parameters: {self.mlp_model.count_params():,}")
+        total_params = sum(p.numel() for p in self.mlp_model.parameters())
+        self.log.info(f"Total parameters: {total_params:,}")
 
     def train_model(self) -> None:
-        self.log.info("Training MLP...")
+        self.log.info("Training MLP with PyTorch Lightning...")
 
+        # Prepare data loaders
+        train_data = torch.FloatTensor(self.train_features_balanced)
+        train_labels = torch.LongTensor(self.train_labels_balanced)
+        test_data = torch.FloatTensor(self.test_features)
+        test_labels = torch.LongTensor(self.test_labels)
+
+        train_dataset = TensorDataset(train_data, train_labels)
+        test_dataset = TensorDataset(test_data, test_labels)
+
+        # Use multiprocessing on Linux/Mac, single process on Windows
+        num_workers = 4 if os.name != "nt" else 0
+
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=self.config.batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=True if torch.cuda.is_available() else False,
+            persistent_workers=True if num_workers > 0 else False,
+        )
+        val_loader = DataLoader(
+            test_dataset,
+            batch_size=self.config.batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True if torch.cuda.is_available() else False,
+            persistent_workers=True if num_workers > 0 else False,
+        )
+
+        # Callbacks
+        os.makedirs("./artifacts", exist_ok=True)
         callbacks = [
             EarlyStopping(
-                monitor="val_accuracy",
+                monitor="val_acc",
                 patience=self.config.early_stopping_patience,
                 min_delta=1e-4,
-                restore_best_weights=True,
-                verbose=1,
                 mode="max",
-            ),
-            ReduceLROnPlateau(
-                monitor="val_accuracy",
-                factor=self.config.reduce_lr_factor,
-                patience=self.config.reduce_lr_patience,
-                min_lr=self.config.min_lr,
-                verbose=1,
-                mode="max",
+                verbose=True,
             ),
             ModelCheckpoint(
-                filepath=Path("artifacts") / "classifier_temp.keras",
-                monitor="val_accuracy",
-                save_best_only=True,
-                save_weights_only=False,
-                verbose=1,
+                dirpath="./artifacts",
+                filename="classifier_temp",
+                monitor="val_acc",
+                save_top_k=1,
                 mode="max",
+                verbose=True,
             ),
+            LearningRateMonitor(logging_interval="epoch"),
         ]
 
-        self.training_history = self.mlp_model.fit(
-            self.train_features_balanced,
-            self.train_labels_balanced,
-            epochs=self.config.epochs,
-            batch_size=self.config.batch_size,
-            validation_data=(self.test_features, self.test_labels),
+        # Trainer
+        trainer = L.Trainer(
+            max_epochs=self.config.epochs,
+            accelerator="auto",
+            devices=1,
             callbacks=callbacks,
-            class_weight=self.class_weights,
-            verbose=1,
+            enable_progress_bar=True,
+            log_every_n_steps=50,
+            logger=CSVLogger("logs")
         )
+
+        # Train
+        trainer.fit(self.lightning_module, train_loader, val_loader)
+
+        # Load best model
+        best_model_path = callbacks[1].best_model_path
+        if best_model_path:
+            self.lightning_module = MLPLightningModule.load_from_checkpoint(
+                best_model_path,
+                model=self.mlp_model,
+                class_weights=self.class_weights_tensor.to(self.device) if self.class_weights_tensor is not None else None,
+            )
+            self.log.info(f"Loaded best model from {best_model_path}")
 
         self.log.info("Training completed")
 
     def evaluate_model(self) -> None:
         self.log.info("Evaluating model...")
 
-        self.test_loss, self.test_accuracy = self.mlp_model.evaluate(
-            self.test_features, self.test_labels, verbose=0
-        )
+        self.lightning_module.eval()
+        self.lightning_module.to(self.device)
+
+        test_data = torch.FloatTensor(self.test_features).to(self.device)
+        test_labels_tensor = torch.LongTensor(self.test_labels).to(self.device)
+
+        with torch.no_grad():
+            logits = self.lightning_module(test_data)
+            loss = nn.CrossEntropyLoss()(logits, test_labels_tensor)
+            self.predictions = torch.argmax(logits, dim=1).cpu().numpy()
+            probs = torch.softmax(logits, dim=1).cpu().numpy()
+
+        self.test_loss = loss.item()
+        self.test_accuracy = (self.predictions == self.test_labels).mean()
 
         self.log.info(f"Test accuracy: {self.test_accuracy:.4f}")
         self.log.info(f"Test loss: {self.test_loss:.4f}")
-
-        self.predictions = np.argmax(
-            self.mlp_model.predict(self.test_features, verbose=0), axis=1
-        )
 
         print("Detailed classification report:")
         report = classification_report(
@@ -369,6 +517,15 @@ class MLP:
         os.makedirs("./artifacts", exist_ok=True)
         os.makedirs("./outputs", exist_ok=True)
 
+        # Get prediction probabilities
+        self.lightning_module.eval()
+        self.lightning_module.to(self.device)
+
+        with torch.no_grad():
+            test_data = torch.FloatTensor(self.test_features).to(self.device)
+            logits = self.lightning_module(test_data)
+            prediction_probs = torch.softmax(logits, dim=1).cpu().numpy()
+
         output_df = pd.DataFrame(
             {
                 "Label": self.label_encoder.inverse_transform(self.test_labels),
@@ -379,7 +536,6 @@ class MLP:
             }
         )
 
-        prediction_probs = self.mlp_model.predict(self.test_features, verbose=0)
         for idx, class_name in enumerate(self.label_encoder.classes_):
             output_df[f"prob_{class_name}"] = prediction_probs[:, idx]
 
@@ -387,8 +543,18 @@ class MLP:
         output_df.to_csv(csv_path, index=False)
         self.log.info(f"Saved: {csv_path}")
 
-        model_path = Path("artifacts") / "mlp.keras"
-        self.mlp_model.save(model_path)
+        # Save PyTorch model
+        model_path = Path("artifacts") / "mlp.pt"
+        torch.save(
+            {
+                "model_state_dict": self.mlp_model.state_dict(),
+                "input_dim": self.mlp_model.input_dim,
+                "n_classes": self.mlp_model.n_classes,
+                "layer_sizes": self.config.layer_sizes,
+                "dropout_rates": self.config.dropout_rates,
+            },
+            model_path,
+        )
         self.log.info(f"Saved: {model_path}")
 
         encoder_path = Path("artifacts") / "label_encoder.pkl"
@@ -431,12 +597,17 @@ class MLP:
         ax.set_ylabel("True")
 
         ax = axes[0, 1]
-        ax.plot(self.training_history.history["accuracy"], label="Train", linewidth=2)
-        ax.plot(self.training_history.history["val_accuracy"], label="Val", linewidth=2)
+        ax.text(
+            0.5,
+            0.5,
+            f"Training completed\nwith PyTorch Lightning\n\nTest Accuracy: {self.test_accuracy:.4f}",
+            ha="center",
+            va="center",
+            fontsize=12,
+        )
         ax.set_title("Training History")
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Accuracy")
-        ax.legend()
         ax.grid(alpha=0.3)
 
         ax = axes[1, 0]

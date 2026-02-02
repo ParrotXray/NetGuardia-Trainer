@@ -3,8 +3,8 @@ import os
 import ujson
 import numpy as np
 import pandas as pd
-import tensorflow as tf
-import tf2onnx
+import torch
+import torch.nn as nn
 import onnx
 import onnxruntime as ort
 import joblib
@@ -14,13 +14,15 @@ from skl2onnx import convert_sklearn
 from skl2onnx.common.data_types import FloatTensorType
 from utils import Logger
 from model import ExportConfig
+from .DeepAutoencoder import AutoencoderModel
+from .MLP import MLPModel
 
 
 class Exporter:
     def __init__(self, config: Optional[ExportConfig] = None) -> None:
-        self.deep_ae_model: Optional[tf.keras.Model] = None
+        self.deep_ae_model: Optional[AutoencoderModel] = None
         self.rf_model: Optional[Any] = None
-        self.mlp_model: Optional[tf.keras.Model] = None
+        self.mlp_model: Optional[MLPModel] = None
         self.label_encoder: Optional[Any] = None
 
         self.scaler: Optional[Any] = None
@@ -39,6 +41,8 @@ class Exporter:
         self.config: ExportConfig = config or ExportConfig()
         self.log: Logger = Logger("Exporter")
 
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     def load_models(self) -> None:
         self.log.info("Loading models and configurations...")
 
@@ -53,14 +57,26 @@ class Exporter:
 
         model_path = Path("artifacts")
 
+        # Load Deep Autoencoder (PyTorch)
         try:
-            ae_path = model_path / "deep_autoencoder.keras"
-            self.deep_ae_model = tf.keras.models.load_model(ae_path)
-            self.log.info("Deep Autoencoder loaded")
+            ae_path = model_path / "deep_autoencoder.pt"
+            checkpoint = torch.load(ae_path, map_location=self.device, weights_only=False)
+
+            self.deep_ae_model = AutoencoderModel(
+                input_dim=checkpoint["input_dim"],
+                layer_sizes=checkpoint["layer_sizes"],
+                encoding_dim=checkpoint["encoding_dim"],
+                dropout_rates=checkpoint["dropout_rates"],
+                l2_reg=checkpoint["l2_reg"],
+            )
+            self.deep_ae_model.load_state_dict(checkpoint["model_state_dict"])
+            self.deep_ae_model.eval()
+            self.log.info("Deep Autoencoder loaded (PyTorch)")
         except Exception as e:
             self.log.error(f"Failed to load Deep Autoencoder: {e}")
             raise
 
+        # Load Random Forest
         try:
             rf_path = model_path / "random_forest.pkl"
             self.rf_model = joblib.load(rf_path)
@@ -69,16 +85,29 @@ class Exporter:
             self.log.error(f"Failed to load Random Forest: {e}")
             raise
 
+        # Load MLP (PyTorch)
         try:
-            mlp_path = model_path / "mlp.keras"
+            mlp_path = model_path / "mlp.pt"
             encoder_path = model_path / "label_encoder.pkl"
-            self.mlp_model = tf.keras.models.load_model(mlp_path)
+
+            mlp_checkpoint = torch.load(mlp_path, map_location=self.device, weights_only=False)
+
+            self.mlp_model = MLPModel(
+                input_dim=mlp_checkpoint["input_dim"],
+                n_classes=mlp_checkpoint["n_classes"],
+                layer_sizes=mlp_checkpoint["layer_sizes"],
+                dropout_rates=mlp_checkpoint["dropout_rates"],
+            )
+            self.mlp_model.load_state_dict(mlp_checkpoint["model_state_dict"])
+            self.mlp_model.eval()
+
             self.label_encoder = joblib.load(encoder_path)
-            self.log.info("MLP Improved loaded")
+            self.log.info("MLP Improved loaded (PyTorch)")
         except Exception as e:
             self.log.error(f"Failed to load MLP: {e}")
             raise
 
+        # Load configuration
         try:
             config_path = model_path / "deep_ae_ensemble_config.pkl"
             ensemble_config = joblib.load(config_path)
@@ -109,15 +138,27 @@ class Exporter:
         if not os.path.exists("./exports"):
             os.makedirs("./exports", exist_ok=True)
 
-        input_dim = self.deep_ae_model.input.shape[1]
-        spec = (tf.TensorSpec((None, input_dim), tf.float32, name="input"),)
-
-        model_proto, _ = tf2onnx.convert.from_keras(
-            self.deep_ae_model, input_signature=spec, opset=self.config.opset_version
-        )
+        self.deep_ae_model.eval()
+        input_dim = self.deep_ae_model.input_dim
+        dummy_input = torch.randn(1, input_dim)
 
         self.deep_ae_onnx_path = Path("exports") / "deep_autoencoder.onnx"
-        onnx.save(model_proto, self.deep_ae_onnx_path)
+
+        torch.onnx.export(
+            self.deep_ae_model,
+            dummy_input,
+            self.deep_ae_onnx_path,
+            export_params=True,
+            opset_version=self.config.opset_version,
+            do_constant_folding=True,
+            input_names=["input"],
+            output_names=["output"],
+            dynamic_axes={
+                "input": {0: "batch_size"},
+                "output": {0: "batch_size"},
+            },
+        )
+
         self.log.info(f"Saved: {self.deep_ae_onnx_path}")
 
         onnx_model = onnx.load(self.deep_ae_onnx_path)
@@ -156,22 +197,34 @@ class Exporter:
         if not os.path.exists("./exports"):
             os.makedirs("./exports", exist_ok=True)
 
-        mlp_input_dim = self.mlp_model.input_shape[1]
-        spec = (tf.TensorSpec((None, mlp_input_dim), tf.float32, name="input"),)
-
-        model_proto, _ = tf2onnx.convert.from_keras(
-            self.mlp_model, input_signature=spec, opset=self.config.opset_version
-        )
+        self.mlp_model.eval()
+        input_dim = self.mlp_model.input_dim
+        dummy_input = torch.randn(1, input_dim)
 
         self.mlp_onnx_path = Path("exports") / "mlp.onnx"
-        onnx.save(model_proto, self.mlp_onnx_path)
+
+        torch.onnx.export(
+            self.mlp_model,
+            dummy_input,
+            self.mlp_onnx_path,
+            export_params=True,
+            opset_version=self.config.opset_version,
+            do_constant_folding=True,
+            input_names=["input"],
+            output_names=["output"],
+            dynamic_axes={
+                "input": {0: "batch_size"},
+                "output": {0: "batch_size"},
+            },
+        )
+
         self.log.info(f"Saved: {self.mlp_onnx_path}")
 
         onnx_model = onnx.load(self.mlp_onnx_path)
         onnx.checker.check_model(onnx_model)
         self.log.info("ONNX model validation passed")
 
-        print("\nRandom Forest ONNX outputs:")
+        print("\nMLP ONNX outputs:")
         for output in onnx_model.graph.output:
             print(f"  {output.name}: {output.type}")
 
@@ -239,10 +292,11 @@ class Exporter:
 
         self.full_config = {
             "created_at": pd.Timestamp.now().isoformat(),
+            "framework": "PyTorch",
             "model": {
                 "deep_autoencoder": {
                     "file": "deep_autoencoder.onnx",
-                    "input_dim": int(self.deep_ae_model.input.shape[1]),
+                    "input_dim": int(self.deep_ae_model.input_dim),
                     "encoding_dim": int(self.encoding_dim),
                 },
                 "random_forest": {
@@ -252,7 +306,7 @@ class Exporter:
                 },
                 "mlp_classifier": {
                     "file": "mlp.onnx",
-                    "input_dim": int(self.mlp_model.input_shape[1]),
+                    "input_dim": int(self.mlp_model.input_dim),
                     "n_classes": int(len(self.label_encoder.classes_)),
                 },
             },
@@ -354,8 +408,12 @@ class Exporter:
         print("Testing MLP Classifier:")
         session_mlp = ort.InferenceSession(str(self.mlp_onnx_path))
         mlp_output = session_mlp.run(None, {"input": test_input_scaled})[0]
-        predicted_class = np.argmax(mlp_output[0])
-        confidence = mlp_output[0][predicted_class]
+
+        # Apply softmax for PyTorch model output (logits)
+        mlp_probs = np.exp(mlp_output[0]) / np.sum(np.exp(mlp_output[0]))
+        predicted_class = np.argmax(mlp_probs)
+        confidence = mlp_probs[predicted_class]
+
         print(
             f"Predicted Class: {predicted_class} ({self.label_encoder.classes_[predicted_class]})"
         )
@@ -405,7 +463,8 @@ class Exporter:
         self.log.info("Export Summary...")
 
         print("Model Information:")
-        input_dim = self.deep_ae_model.input.shape[1]
+        input_dim = self.deep_ae_model.input_dim
+        print(f"Framework: PyTorch + PyTorch Lightning")
         print(f"Deep AE: {input_dim} dim -> {self.encoding_dim} dim bottleneck")
         print(f"Random Forest: {self.rf_model.n_estimators} trees")
         print(f"MLP: {len(self.label_encoder.classes_)} attack classes")

@@ -1,20 +1,21 @@
-numpy==2.3.4
-pandas==2.3.3
-scipy==1.16.2
+numpy<=2.3.4
+pandas<=2.3.3
+scipy<=1.16.2
 
-scikit-learn==1.7.2
-imbalanced-learn==0.14.0
-tensorflow==2.20.0
+scikit-learn<=1.7.2
+imbalanced-learn<=0.14.1
 
-onnx==1.17.0
-onnxruntime==1.23.2
-skl2onnx==1.19.1
-git+https://github.com/ParrotXray/tensorflow-onnx
+torch<=2.10.0
+lightning[extra]<=2.6.1
 
-matplotlib==3.10.8
-seaborn==0.13.2
+onnx<=1.20.1
+onnxruntime<=1.23.2
+skl2onnx<=1.20.0
 
-joblib==1.5.2
-ujson==5.11.0
-coloredlogs==15.0.1
-termcolor==3.1.0
+matplotlib<=3.10.8
+seaborn<=0.13.2
+
+joblib<=1.5.3
+ujson<=5.11.0
+coloredlogs<=15.0.1
+termcolor<=3.3.0

@@ -1,7 +1,11 @@
 import os
-
 import pandas as pd
-import tensorflow as tf
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+import lightning as L
+from lightning.pytorch.loggers import CSVLogger
+from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
 from typing import List, Optional, Dict, Any
 from pathlib import Path
 from utils import Logger
@@ -9,13 +13,138 @@ from model import DeepAutoencoderConfig
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
-from tensorflow import keras
-from tensorflow.keras import layers, models, regularizers
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
-from tensorflow.keras.optimizers import Adam
 import joblib
 import matplotlib.pyplot as plt
+
+
+class AutoencoderModel(nn.Module):
+    """PyTorch Deep Autoencoder Model"""
+
+    def __init__(
+        self,
+        input_dim: int,
+        layer_sizes: List[int],
+        encoding_dim: int,
+        dropout_rates: List[float],
+        l2_reg: float = 0.0001,
+    ):
+        super().__init__()
+        self.input_dim = input_dim
+        self.encoding_dim = encoding_dim
+
+        # Encoder
+        encoder_layers = []
+        prev_size = input_dim
+        for i, (size, dropout) in enumerate(zip(layer_sizes, dropout_rates)):
+            encoder_layers.append(nn.Linear(prev_size, size))
+            encoder_layers.append(nn.BatchNorm1d(size))
+            encoder_layers.append(nn.ReLU())
+            if dropout > 0:
+                encoder_layers.append(nn.Dropout(dropout))
+            prev_size = size
+
+        # Bottleneck
+        encoder_layers.append(nn.Linear(prev_size, encoding_dim))
+        encoder_layers.append(nn.ReLU())
+        self.encoder = nn.Sequential(*encoder_layers)
+
+        # Decoder
+        decoder_layers = []
+        prev_size = encoding_dim
+        for i, (size, dropout) in enumerate(
+            zip(reversed(layer_sizes), reversed(dropout_rates))
+        ):
+            decoder_layers.append(nn.Linear(prev_size, size))
+            decoder_layers.append(nn.BatchNorm1d(size))
+            decoder_layers.append(nn.ReLU())
+            if dropout > 0:
+                decoder_layers.append(nn.Dropout(dropout))
+            prev_size = size
+
+        # Output layer
+        decoder_layers.append(nn.Linear(prev_size, input_dim))
+        self.decoder = nn.Sequential(*decoder_layers)
+
+        # Apply L2 regularization through weight decay in optimizer
+        self.l2_reg = l2_reg
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        encoded = self.encoder(x)
+        decoded = self.decoder(encoded)
+        return decoded
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        return self.encoder(x)
+
+
+class AutoencoderLightningModule(L.LightningModule):
+    """PyTorch Lightning Module for Autoencoder Training"""
+
+    def __init__(
+        self,
+        model: AutoencoderModel,
+        learning_rate: float = 0.001,
+        clipnorm: float = 1.0,
+        reduce_lr_factor: float = 0.5,
+        reduce_lr_patience: int = 8,
+        min_lr: float = 1e-7,
+    ):
+        super().__init__()
+        self.model = model
+        self.learning_rate = learning_rate
+        self.clipnorm = clipnorm
+        self.reduce_lr_factor = reduce_lr_factor
+        self.reduce_lr_patience = reduce_lr_patience
+        self.min_lr = min_lr
+        self.loss_fn = nn.MSELoss()
+
+        self.save_hyperparameters(ignore=["model"])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+    def training_step(self, batch, batch_idx):
+        x = batch[0]
+        x_hat = self(x)
+        loss = self.loss_fn(x_hat, x)
+        mae = torch.mean(torch.abs(x_hat - x))
+
+        self.log("train_loss", loss, prog_bar=True, on_step=False, on_epoch=True)
+        self.log("train_mae", mae, prog_bar=False, on_step=False, on_epoch=True)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        x = batch[0]
+        x_hat = self(x)
+        loss = self.loss_fn(x_hat, x)
+        mae = torch.mean(torch.abs(x_hat - x))
+
+        self.log("val_loss", loss, prog_bar=True, on_step=False, on_epoch=True)
+        self.log("val_mae", mae, prog_bar=False, on_step=False, on_epoch=True)
+        return loss
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(
+            self.parameters(),
+            lr=self.learning_rate,
+            weight_decay=self.model.l2_reg,
+        )
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=self.reduce_lr_factor,
+            patience=self.reduce_lr_patience,
+            min_lr=self.min_lr,
+        )
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "monitor": "val_loss",
+                "interval": "epoch",
+                "frequency": 1,
+            },
+        }
 
 
 class DeepAutoencoder:
@@ -36,7 +165,8 @@ class DeepAutoencoder:
         self.benign_features_scaled: Optional[np.ndarray] = None
         self.test_features_scaled: Optional[np.ndarray] = None
 
-        self.autoencoder_model: Optional[keras.Model] = None
+        self.autoencoder_model: Optional[AutoencoderModel] = None
+        self.lightning_module: Optional[AutoencoderLightningModule] = None
         self.random_forest_model: Optional[RandomForestClassifier] = None
 
         self.ae_normalization_params: Optional[Dict[str, float]] = None
@@ -48,16 +178,23 @@ class DeepAutoencoder:
         self.strategy_results: Optional[List[Dict[str, Any]]] = []
         self.best_strategy: Optional[Dict[str, Any]] = None
 
-        self.training_history: Optional[keras.callbacks.History] = None
+        self.training_history: Optional[Dict[str, List[float]]] = None
 
         self.config: Optional[DeepAutoencoderConfig] = config or DeepAutoencoderConfig()
 
         self.log: Logger = Logger("DeepAutoencoder")
 
+        # Device configuration
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     def check_tensorflow(self) -> None:
-        self.log.info(f"TensorFlow: {tf.__version__}")
-        gpus = tf.config.list_physical_devices("GPU")
-        self.log.info(f"GPU: {gpus if gpus else 'No GPU detected'}")
+        """Check PyTorch and GPU availability"""
+        self.log.info(f"PyTorch: {torch.__version__}")
+        if torch.cuda.is_available():
+            self.log.info(f"GPU: {torch.cuda.get_device_name(0)}")
+            self.log.info(f"CUDA: {torch.version.cuda}")
+        else:
+            self.log.info("GPU: No GPU detected, using CPU")
 
     def load_data(self) -> None:
         self.log.info("Loading data from outputs/preprocessing_benign.csv...")
@@ -142,101 +279,136 @@ class DeepAutoencoder:
         )
         self.log.info(f"Architecture: {layer_info}")
 
-        inputs = layers.Input(shape=(input_dim,))
-        x = inputs
-
-        for i, (size, dropout) in enumerate(
-            zip(self.config.layer_sizes, self.config.dropout_rates)
-        ):
-            x = layers.Dense(size, activation="relu")(x)
-            x = layers.BatchNormalization()(x)
-            if dropout > 0:
-                x = layers.Dropout(dropout)(x)
-
-        encoded = layers.Dense(
-            self.config.encoding_dim,
-            activation="relu",
-            kernel_regularizer=regularizers.l2(self.config.l2_reg),
-            name="bottleneck",
-        )(x)
-
-        x = encoded
-        for i, (size, dropout) in enumerate(
-            zip(reversed(self.config.layer_sizes), reversed(self.config.dropout_rates))
-        ):
-            x = layers.Dense(size, activation="relu")(x)
-            x = layers.BatchNormalization()(x)
-            if dropout > 0:
-                x = layers.Dropout(dropout)(x)
-
-        decoded = layers.Dense(input_dim, activation="linear")(x)
-
-        self.autoencoder_model = models.Model(inputs, decoded, name="deep_autoencoder")
-
-        self.autoencoder_model.compile(
-            optimizer=Adam(
-                learning_rate=self.config.learning_rate, clipnorm=self.config.clipnorm
-            ),
-            loss="mse",
-            metrics=["mae"],
+        self.autoencoder_model = AutoencoderModel(
+            input_dim=input_dim,
+            layer_sizes=self.config.layer_sizes,
+            encoding_dim=self.config.encoding_dim,
+            dropout_rates=self.config.dropout_rates,
+            l2_reg=self.config.l2_reg,
         )
 
-        self.log.info(f"Total parameters: {self.autoencoder_model.count_params():,}")
+        self.lightning_module = AutoencoderLightningModule(
+            model=self.autoencoder_model,
+            learning_rate=self.config.learning_rate,
+            clipnorm=self.config.clipnorm,
+            reduce_lr_factor=self.config.reduce_lr_factor,
+            reduce_lr_patience=self.config.reduce_lr_patience,
+            min_lr=self.config.min_lr,
+        )
+
+        total_params = sum(p.numel() for p in self.autoencoder_model.parameters())
+        self.log.info(f"Total parameters: {total_params:,}")
 
     def train_autoencoder(self) -> None:
-        self.log.info("Training Deep Autoencoder...")
+        self.log.info("Training Deep Autoencoder with PyTorch Lightning...")
 
+        # Prepare data loaders
+        train_size = int(len(self.benign_features_scaled) * (1 - self.config.validation_split))
+        indices = np.random.permutation(len(self.benign_features_scaled))
+        train_indices = indices[:train_size]
+        val_indices = indices[train_size:]
+
+        train_data = torch.FloatTensor(self.benign_features_scaled[train_indices])
+        val_data = torch.FloatTensor(self.benign_features_scaled[val_indices])
+
+        train_dataset = TensorDataset(train_data)
+        val_dataset = TensorDataset(val_data)
+
+        # Use multiprocessing on Linux/Mac, single process on Windows
+        num_workers = 4 if os.name != "nt" else 0
+
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=self.config.batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=True if torch.cuda.is_available() else False,
+            persistent_workers=True if num_workers > 0 else False,
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=self.config.batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True if torch.cuda.is_available() else False,
+            persistent_workers=True if num_workers > 0 else False,
+        )
+
+        # Callbacks
+        os.makedirs("./artifacts", exist_ok=True)
         callbacks = [
             EarlyStopping(
                 monitor="val_loss",
                 patience=self.config.early_stopping_patience,
                 min_delta=1e-6,
-                restore_best_weights=True,
-                verbose=1,
                 mode="min",
-            ),
-            ReduceLROnPlateau(
-                monitor="val_loss",
-                factor=self.config.reduce_lr_factor,
-                patience=self.config.reduce_lr_patience,
-                min_lr=self.config.min_lr,
-                verbose=1,
-                mode="min",
+                verbose=True,
             ),
             ModelCheckpoint(
-                filepath=Path("artifacts") / "autoencoder_temp.keras",
+                dirpath="./artifacts",
+                filename="autoencoder_temp",
                 monitor="val_loss",
-                save_best_only=True,
-                save_weights_only=False,
-                verbose=1,
+                save_top_k=1,
                 mode="min",
+                verbose=True,
             ),
+            LearningRateMonitor(logging_interval="epoch"),
         ]
 
-        self.training_history = self.autoencoder_model.fit(
-            self.benign_features_scaled,
-            self.benign_features_scaled,
-            epochs=self.config.epochs,
-            batch_size=self.config.batch_size,
-            validation_split=self.config.validation_split,
+        # Trainer
+        trainer = L.Trainer(
+            max_epochs=self.config.epochs,
+            accelerator="auto",
+            devices=1,
             callbacks=callbacks,
-            verbose=1,
+            enable_progress_bar=True,
+            gradient_clip_val=self.config.clipnorm,
+            log_every_n_steps=50,
+            logger=CSVLogger("logs")
         )
 
-        epochs = len(self.training_history.history["loss"])
-        final_train_loss = self.training_history.history["loss"][-1]
-        final_val_loss = self.training_history.history["val_loss"][-1]
+        # Train
+        trainer.fit(self.lightning_module, train_loader, val_loader)
 
-        print(f"Training completed: {epochs} epochs")
-        print(f"Final train loss: {final_train_loss:.6f}")
-        print(f"Final validation loss: {final_val_loss:.6f}")
+        # Load best model
+        best_model_path = callbacks[1].best_model_path
+        if best_model_path:
+            self.lightning_module = AutoencoderLightningModule.load_from_checkpoint(
+                best_model_path,
+                model=self.autoencoder_model,
+            )
+            self.log.info(f"Loaded best model from {best_model_path}")
+
+        # Extract training history from trainer
+        self.training_history = {
+            "loss": [],
+            "val_loss": [],
+        }
+
+        # Get metrics from trainer's logged metrics
+        epochs_trained = trainer.current_epoch + 1 if trainer.current_epoch else self.config.epochs
+
+        print(f"Training completed: {epochs_trained} epochs")
+        print(f"Best validation loss: {callbacks[1].best_model_score:.6f}")
 
     def calculate_ae_normalization(self) -> None:
         self.log.info("Calculating AE normalization parameters...")
 
-        ae_reconstructions = self.autoencoder_model.predict(
-            self.benign_features_scaled, batch_size=2048, verbose=1
-        )
+        self.lightning_module.eval()
+        self.lightning_module.to(self.device)
+
+        with torch.no_grad():
+            benign_tensor = torch.FloatTensor(self.benign_features_scaled).to(self.device)
+            batch_size = 2048
+            ae_reconstructions = []
+
+            for i in range(0, len(benign_tensor), batch_size):
+                batch = benign_tensor[i : i + batch_size]
+                recon = self.lightning_module(batch)
+                ae_reconstructions.append(recon.cpu().numpy())
+
+            ae_reconstructions = np.vstack(ae_reconstructions)
+
         ae_mse_benign = np.mean(
             np.square(self.benign_features_scaled - ae_reconstructions), axis=1
         )
@@ -259,19 +431,25 @@ class DeepAutoencoder:
     def predict_autoencoder(self) -> None:
         self.log.info("Calculating Deep AE anomaly scores...")
 
+        self.lightning_module.eval()
+        self.lightning_module.to(self.device)
+
         batch_size = 2048
         n_samples = len(self.test_features_scaled)
         self.ae_mse_scores = np.zeros(n_samples, dtype=np.float32)
 
-        for start in range(0, n_samples, batch_size):
-            end = min(start + batch_size, n_samples)
-            batch_data = self.test_features_scaled[start:end]
-            batch_pred = self.autoencoder_model.predict(batch_data, verbose=0)
-            self.ae_mse_scores[start:end] = np.mean(
-                np.square(batch_data - batch_pred), axis=1
-            )
-            if (start // batch_size) % 500 == 0:
-                print(f"Progress: {end:,}/{n_samples:,} ({end/n_samples*100:.1f}%)")
+        with torch.no_grad():
+            for start in range(0, n_samples, batch_size):
+                end = min(start + batch_size, n_samples)
+                batch_data = torch.FloatTensor(self.test_features_scaled[start:end]).to(
+                    self.device
+                )
+                batch_pred = self.lightning_module(batch_data).cpu().numpy()
+                self.ae_mse_scores[start:end] = np.mean(
+                    np.square(self.test_features_scaled[start:end] - batch_pred), axis=1
+                )
+                if (start // batch_size) % 500 == 0:
+                    print(f"Progress: {end:,}/{n_samples:,} ({end/n_samples*100:.1f}%)")
 
         ae_mse_benign = self.ae_mse_scores[self.test_labels == 0]
         ae_mse_attack = self.ae_mse_scores[self.test_labels == 1]
@@ -419,7 +597,6 @@ class DeepAutoencoder:
                     and fpr < estimate_fpr_limit
                     and tpr > 0.90
                 ):
-                    # self.log.info(f"Strict selection criteria: {fpr}, {tpr}")
                     best_f1 = f1
                     best_threshold = threshold
                     best_metrics = {
@@ -451,16 +628,6 @@ class DeepAutoencoder:
                 )
 
         self.best_strategy = max(self.strategy_results, key=lambda x: x["f1"])
-
-        # self.best_strategy = min(
-        #     [s for s in self.strategy_results if s["f1"] > 0.95],
-        #     key=lambda x: x["fpr"]
-        # )
-
-        # self.best_strategy = max(
-        #     self.strategy_results,
-        #     key=lambda x: x["f1"] * 0.6 + (1 - x["fpr"]) * 0.4
-        # )
 
         print(f"\n{'=' * 60}")
         print(f"Best strategy: {self.best_strategy['name']}")
@@ -522,8 +689,19 @@ class DeepAutoencoder:
         output_filtered.to_csv(output_path, index=False)
         self.log.info(f"Saved: {output_path}")
 
-        model_ae_path = Path("artifacts") / "deep_autoencoder.keras"
-        self.autoencoder_model.save(model_ae_path)
+        # Save PyTorch model
+        model_ae_path = Path("artifacts") / "deep_autoencoder.pt"
+        torch.save(
+            {
+                "model_state_dict": self.autoencoder_model.state_dict(),
+                "input_dim": self.autoencoder_model.input_dim,
+                "encoding_dim": self.autoencoder_model.encoding_dim,
+                "layer_sizes": self.config.layer_sizes,
+                "dropout_rates": self.config.dropout_rates,
+                "l2_reg": self.config.l2_reg,
+            },
+            model_ae_path,
+        )
         self.log.info(f"Saved: {model_ae_path}")
 
         model_rf_path = Path("artifacts") / "random_forest.pkl"
@@ -550,13 +728,19 @@ class DeepAutoencoder:
 
         fig, axes = plt.subplots(2, 3, figsize=(18, 10))
 
+        # Plot 1: Training History (placeholder since Lightning handles this differently)
         ax = axes[0, 0]
-        ax.plot(self.training_history.history["loss"], label="Train", linewidth=2)
-        ax.plot(self.training_history.history["val_loss"], label="Val", linewidth=2)
+        ax.text(
+            0.5,
+            0.5,
+            "Training completed\nwith PyTorch Lightning",
+            ha="center",
+            va="center",
+            fontsize=12,
+        )
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Loss")
         ax.set_title("Deep AE Training History")
-        ax.legend()
         ax.grid(alpha=0.3)
 
         ax = axes[0, 1]
