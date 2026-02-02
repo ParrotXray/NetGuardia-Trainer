@@ -34,7 +34,7 @@ if __name__ == "__main__":
         log.info("Start processing data...")
         dp = DataPreprocess(args.set)
         dp.load_datasets()
-        dp.merge_dataset()
+        dp.statistics_dataset()
         dp.feature_preparation()
         dp.output_result()
 

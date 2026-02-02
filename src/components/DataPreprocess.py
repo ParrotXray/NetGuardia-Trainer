@@ -59,11 +59,11 @@ class DataPreprocess:
 
         self.log.info(f"Successfully loaded {len(self.datasets)} datasets")
 
-    def merge_dataset(self) -> None:
+    def statistics_dataset(self) -> None:
         if not self.datasets:
-            raise ValueError("No datasets to merge!")
+            raise ValueError("No datasets to statistics!")
 
-        self.log.info(f"Merge dataset...")
+        self.log.info(f"Statistics dataset...")
         self.combined_data = pd.concat(self.datasets, ignore_index=True)
 
         self.labels = (
@@ -72,7 +72,7 @@ class DataPreprocess:
 
         _mapping = {
             # 2017
-            "Web Attack - Brute Force": "Web Attack",
+            "Web Attack - Brute Force": "Brute Force",
             "Web Attack - Sql Injection": "Web Attack",
             "Web Attack - XSS": "Web Attack",
             "Infiltration": "Web Attack",
@@ -85,8 +85,8 @@ class DataPreprocess:
             'SSH-Patator': 'Brute Force',
 
             # 2018
-            "Brute Force -Web": "Web Attack",
-            "Brute Force -XSS": "Web Attack",
+            "Brute Force -Web": "Brute Force",
+            "Brute Force -XSS": "Brute Force",
             "SQL Injection": "Web Attack",
             "Infilteration": "Web Attack",
             'DDOS attack-HOIC': 'DDoS',
