@@ -1,4 +1,4 @@
-# Train-models
+# Training-NetGuardia-models
 
 ## Run script
 Python >= 3.10.x and Linux is required.
