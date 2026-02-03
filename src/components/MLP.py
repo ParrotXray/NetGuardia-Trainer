@@ -462,7 +462,7 @@ class MLP:
             callbacks=callbacks,
             enable_progress_bar=True,
             log_every_n_steps=50,
-            logger=CSVLogger("logs")
+            logger=True
         )
 
         # Train

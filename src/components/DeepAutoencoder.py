@@ -364,7 +364,7 @@ class DeepAutoencoder:
             enable_progress_bar=True,
             gradient_clip_val=self.config.clipnorm,
             log_every_n_steps=50,
-            logger=CSVLogger("logs")
+            logger=True,
         )
 
         # Train
