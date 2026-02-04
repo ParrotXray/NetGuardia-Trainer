@@ -59,7 +59,9 @@ class Exporter:
 
         try:
             ae_path = model_path / "deep_autoencoder.pt"
-            checkpoint = torch.load(ae_path, map_location=self.device, weights_only=False)
+            checkpoint = torch.load(
+                ae_path, map_location=self.device, weights_only=False
+            )
 
             self.deep_ae_model = AutoencoderModel(
                 input_dim=checkpoint["input_dim"],
@@ -87,7 +89,9 @@ class Exporter:
             mlp_path = model_path / "mlp.pt"
             encoder_path = model_path / "label_encoder.pkl"
 
-            mlp_checkpoint = torch.load(mlp_path, map_location=self.device, weights_only=False)
+            mlp_checkpoint = torch.load(
+                mlp_path, map_location=self.device, weights_only=False
+            )
 
             self.mlp_model = MLPModel(
                 input_dim=mlp_checkpoint["input_dim"],

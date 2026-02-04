@@ -58,32 +58,32 @@ class PreprocessConfig:
     # CIC-IDS-2018 Dataset Feature Selection
     cic_2018_selected_features: List[str] = field(
         default_factory=lambda: [
-            "Dst Port",           # Destination port number
-            "Protocol",           # Network protocol identifier
-            "Flow Duration",      # Total duration of the flow
-            "Tot Fwd Pkts",       # Total forward packets
-            "Tot Bwd Pkts",       # Total backward packets
-            "TotLen Fwd Pkts",    # Total length of forward packets
-            "TotLen Bwd Pkts",    # Total length of backward packets
-            "Flow Byts/s",        # Flow bytes per second
-            "Flow Pkts/s",        # Flow packets per second
+            "Dst Port",  # Destination port number
+            "Protocol",  # Network protocol identifier
+            "Flow Duration",  # Total duration of the flow
+            "Tot Fwd Pkts",  # Total forward packets
+            "Tot Bwd Pkts",  # Total backward packets
+            "TotLen Fwd Pkts",  # Total length of forward packets
+            "TotLen Bwd Pkts",  # Total length of backward packets
+            "Flow Byts/s",  # Flow bytes per second
+            "Flow Pkts/s",  # Flow packets per second
             "Init Fwd Win Byts",  # Initial forward window bytes
             "Init Bwd Win Byts",  # Initial backward window bytes
-            "Fwd Pkt Len Mean",   # Mean forward packet length
-            "Bwd Pkt Len Mean",   # Mean backward packet length
-            "Flow IAT Mean",      # Mean flow inter-arrival time
-            "Fwd IAT Mean",       # Mean forward inter-arrival time
-            "Bwd IAT Mean",       # Mean backward inter-arrival time
-            "PSH Flag Cnt",       # PSH flag count
-            "ACK Flag Cnt",       # ACK flag count
-            "SYN Flag Cnt",       # SYN flag count
-            "FIN Flag Cnt",       # FIN flag count
-            "RST Flag Cnt",       # RST flag count
-            "Pkt Len Mean",       # Mean packet length
-            "Pkt Len Std",        # Packet length standard deviation
-            "Fwd Pkt Len Std",    # Forward packet length standard deviation
-            "Bwd Pkt Len Std",    # Backward packet length standard deviation
-            "Fwd Seg Size Min",   # Minimum forward segment size
+            "Fwd Pkt Len Mean",  # Mean forward packet length
+            "Bwd Pkt Len Mean",  # Mean backward packet length
+            "Flow IAT Mean",  # Mean flow inter-arrival time
+            "Fwd IAT Mean",  # Mean forward inter-arrival time
+            "Bwd IAT Mean",  # Mean backward inter-arrival time
+            "PSH Flag Cnt",  # PSH flag count
+            "ACK Flag Cnt",  # ACK flag count
+            "SYN Flag Cnt",  # SYN flag count
+            "FIN Flag Cnt",  # FIN flag count
+            "RST Flag Cnt",  # RST flag count
+            "Pkt Len Mean",  # Mean packet length
+            "Pkt Len Std",  # Packet length standard deviation
+            "Fwd Pkt Len Std",  # Forward packet length standard deviation
+            "Bwd Pkt Len Std",  # Backward packet length standard deviation
+            "Fwd Seg Size Min",  # Minimum forward segment size
             "Fwd Act Data Pkts",  # Forward packets with data payload
         ]
     )
@@ -91,32 +91,32 @@ class PreprocessConfig:
     # CIC-IDS-2017 Dataset Feature Selection
     cic_2017_selected_features: List[str] = field(
         default_factory=lambda: [
-            "Destination Port",           # Destination port number
-            "Flow Duration",              # Total duration of the flow
-            "Total Fwd Packets",          # Total forward packets
-            "Total Backward Packets",     # Total backward packets
+            "Destination Port",  # Destination port number
+            "Flow Duration",  # Total duration of the flow
+            "Total Fwd Packets",  # Total forward packets
+            "Total Backward Packets",  # Total backward packets
             "Total Length of Fwd Packets",  # Total length of forward packets
             "Total Length of Bwd Packets",  # Total length of backward packets
-            "Flow Bytes/s",               # Flow bytes per second
-            "Flow Packets/s",             # Flow packets per second
-            "Init_Win_bytes_forward",     # Initial forward window bytes
-            "Init_Win_bytes_backward",    # Initial backward window bytes
-            "Fwd Packet Length Mean",     # Mean forward packet length
-            "Bwd Packet Length Mean",     # Mean backward packet length
-            "Flow IAT Mean",              # Mean flow inter-arrival time
-            "Fwd IAT Mean",               # Mean forward inter-arrival time
-            "Bwd IAT Mean",               # Mean backward inter-arrival time
-            "PSH Flag Count",             # PSH flag count
-            "ACK Flag Count",             # ACK flag count
-            "SYN Flag Count",             # SYN flag count
-            "FIN Flag Count",             # FIN flag count
-            "RST Flag Count",             # RST flag count
-            "Packet Length Mean",         # Mean packet length
-            "Packet Length Std",          # Packet length standard deviation
-            "Fwd Packet Length Std",      # Forward packet length standard deviation
-            "Bwd Packet Length Std",      # Backward packet length standard deviation
-            "min_seg_size_forward",       # Minimum forward segment size
-            "act_data_pkt_fwd",           # Forward packets with data payload
+            "Flow Bytes/s",  # Flow bytes per second
+            "Flow Packets/s",  # Flow packets per second
+            "Init_Win_bytes_forward",  # Initial forward window bytes
+            "Init_Win_bytes_backward",  # Initial backward window bytes
+            "Fwd Packet Length Mean",  # Mean forward packet length
+            "Bwd Packet Length Mean",  # Mean backward packet length
+            "Flow IAT Mean",  # Mean flow inter-arrival time
+            "Fwd IAT Mean",  # Mean forward inter-arrival time
+            "Bwd IAT Mean",  # Mean backward inter-arrival time
+            "PSH Flag Count",  # PSH flag count
+            "ACK Flag Count",  # ACK flag count
+            "SYN Flag Count",  # SYN flag count
+            "FIN Flag Count",  # FIN flag count
+            "RST Flag Count",  # RST flag count
+            "Packet Length Mean",  # Mean packet length
+            "Packet Length Std",  # Packet length standard deviation
+            "Fwd Packet Length Std",  # Forward packet length standard deviation
+            "Bwd Packet Length Std",  # Backward packet length standard deviation
+            "min_seg_size_forward",  # Minimum forward segment size
+            "act_data_pkt_fwd",  # Forward packets with data payload
         ]
     )
 

@@ -7,7 +7,11 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 import lightning as L
 from lightning.pytorch.loggers import CSVLogger
-from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
+from lightning.pytorch.callbacks import (
+    EarlyStopping,
+    ModelCheckpoint,
+    LearningRateMonitor,
+)
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import classification_report, confusion_matrix
@@ -386,7 +390,11 @@ class MLP:
         self.lightning_module = MLPLightningModule(
             model=self.mlp_model,
             learning_rate=self.config.learning_rate,
-            class_weights=self.class_weights_tensor.to(self.device) if self.class_weights_tensor is not None else None,
+            class_weights=(
+                self.class_weights_tensor.to(self.device)
+                if self.class_weights_tensor is not None
+                else None
+            ),
             reduce_lr_factor=self.config.reduce_lr_factor,
             reduce_lr_patience=self.config.reduce_lr_patience,
             min_lr=self.config.min_lr,
@@ -452,7 +460,7 @@ class MLP:
             callbacks=callbacks,
             enable_progress_bar=True,
             log_every_n_steps=50,
-            logger=True
+            logger=True,
         )
 
         trainer.fit(self.lightning_module, train_loader, val_loader)
@@ -462,7 +470,11 @@ class MLP:
             self.lightning_module = MLPLightningModule.load_from_checkpoint(
                 best_model_path,
                 model=self.mlp_model,
-                class_weights=self.class_weights_tensor.to(self.device) if self.class_weights_tensor is not None else None,
+                class_weights=(
+                    self.class_weights_tensor.to(self.device)
+                    if self.class_weights_tensor is not None
+                    else None
+                ),
             )
             self.log.info(f"Loaded best model from {best_model_path}")
 

@@ -5,7 +5,11 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 import lightning as L
 from lightning.pytorch.loggers import CSVLogger
-from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
+from lightning.pytorch.callbacks import (
+    EarlyStopping,
+    ModelCheckpoint,
+    LearningRateMonitor,
+)
 from typing import List, Optional, Dict, Any
 from pathlib import Path
 from utils import Logger
@@ -291,7 +295,9 @@ class DeepAutoencoder:
     def train_autoencoder(self) -> None:
         self.log.info("Training Deep Autoencoder with PyTorch Lightning...")
 
-        train_size = int(len(self.benign_features_scaled) * (1 - self.config.validation_split))
+        train_size = int(
+            len(self.benign_features_scaled) * (1 - self.config.validation_split)
+        )
         indices = np.random.permutation(len(self.benign_features_scaled))
         train_indices = indices[:train_size]
         val_indices = indices[train_size:]
@@ -367,7 +373,9 @@ class DeepAutoencoder:
             "val_loss": [],
         }
 
-        epochs_trained = trainer.current_epoch + 1 if trainer.current_epoch else self.config.epochs
+        epochs_trained = (
+            trainer.current_epoch + 1 if trainer.current_epoch else self.config.epochs
+        )
 
         print(f"Training completed: {epochs_trained} epochs")
         print(f"Best validation loss: {callbacks[1].best_model_score:.6f}")
@@ -379,7 +387,9 @@ class DeepAutoencoder:
         self.lightning_module.to(self.device)
 
         with torch.no_grad():
-            benign_tensor = torch.FloatTensor(self.benign_features_scaled).to(self.device)
+            benign_tensor = torch.FloatTensor(self.benign_features_scaled).to(
+                self.device
+            )
             batch_size = 2048
             ae_reconstructions = []
 
