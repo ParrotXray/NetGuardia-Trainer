@@ -11,7 +11,7 @@ from model import UnsupportedDatasetError
 
 
 class DataPreprocess:
-    def __init__(self, year: str, config: Optional[PreprocessConfig] = None) -> None:
+    def __init__(self, dataset: str, config: Optional[PreprocessConfig] = None) -> None:
 
         self.datasets: List[pd.DataFrame] = []
         self.combined_data: Optional[pd.DataFrame] = None
@@ -20,7 +20,7 @@ class DataPreprocess:
 
         self.config: Optional[PreprocessConfig] = config or PreprocessConfig()
 
-        self.year: int = year
+        self.dataset: str = dataset
         self.log: Logger = Logger("DataPreprocess")
 
     def load_dataset(self, file: str) -> None:
@@ -36,13 +36,13 @@ class DataPreprocess:
             self.log.error(f"Error: {e}")
 
     def load_datasets(self) -> None:
-        if self.year not in ["2017", "2018"]:
+        if self.dataset not in ["2017", "2018"]:
             raise UnsupportedDatasetError(
-                f"Unsupported dataset year: {self.year}. "
+                f"Unsupported dataset year: {self.dataset}. "
                 f"Only 2017 and 2018 are supported."
             )
 
-        csv_dir = "./rawdata/2017" if self.year == "2017" else "./rawdata/2018"
+        csv_dir = "./rawdata/2017" if self.dataset == "2017" else "./rawdata/2018"
 
         self.log.info(f"Loading datasets from {csv_dir}...")
 
@@ -111,15 +111,15 @@ class DataPreprocess:
 
         self.log.info("Feature preparation...")
 
-        if self.year not in ["2017", "2018"]:
+        if self.dataset not in ["2017", "2018"]:
             raise UnsupportedDatasetError(
-                f"Unsupported dataset year: {self.year}. "
+                f"Unsupported dataset year: {self.dataset}. "
                 f"Only 2017 and 2018 are supported."
             )
 
         selected_features = (
             self.config.cic_2017_selected_features
-            if self.year == "2017"
+            if self.dataset == "2017"
             else self.config.cic_2018_selected_features
         )
 

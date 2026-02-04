@@ -2,7 +2,7 @@
 set -e
 cd src/
 
-CMD="main.py"
+CMD="./main.py"
 
 if [ -n "$DATASET" ]; then
     CMD="$CMD --set $DATASET"

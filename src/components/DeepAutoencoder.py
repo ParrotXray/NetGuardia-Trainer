@@ -18,8 +18,6 @@ import matplotlib.pyplot as plt
 
 
 class AutoencoderModel(nn.Module):
-    """PyTorch Deep Autoencoder Model"""
-
     def __init__(
         self,
         input_dim: int,
@@ -32,7 +30,6 @@ class AutoencoderModel(nn.Module):
         self.input_dim = input_dim
         self.encoding_dim = encoding_dim
 
-        # Encoder
         encoder_layers = []
         prev_size = input_dim
         for i, (size, dropout) in enumerate(zip(layer_sizes, dropout_rates)):
@@ -43,12 +40,10 @@ class AutoencoderModel(nn.Module):
                 encoder_layers.append(nn.Dropout(dropout))
             prev_size = size
 
-        # Bottleneck
         encoder_layers.append(nn.Linear(prev_size, encoding_dim))
         encoder_layers.append(nn.ReLU())
         self.encoder = nn.Sequential(*encoder_layers)
 
-        # Decoder
         decoder_layers = []
         prev_size = encoding_dim
         for i, (size, dropout) in enumerate(
@@ -61,11 +56,9 @@ class AutoencoderModel(nn.Module):
                 decoder_layers.append(nn.Dropout(dropout))
             prev_size = size
 
-        # Output layer
         decoder_layers.append(nn.Linear(prev_size, input_dim))
         self.decoder = nn.Sequential(*decoder_layers)
 
-        # Apply L2 regularization through weight decay in optimizer
         self.l2_reg = l2_reg
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -78,8 +71,6 @@ class AutoencoderModel(nn.Module):
 
 
 class AutoencoderLightningModule(L.LightningModule):
-    """PyTorch Lightning Module for Autoencoder Training"""
-
     def __init__(
         self,
         model: AutoencoderModel,
@@ -184,11 +175,9 @@ class DeepAutoencoder:
 
         self.log: Logger = Logger("DeepAutoencoder")
 
-        # Device configuration
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def check_tensorflow(self) -> None:
-        """Check PyTorch and GPU availability"""
         self.log.info(f"PyTorch: {torch.__version__}")
         if torch.cuda.is_available():
             self.log.info(f"GPU: {torch.cuda.get_device_name(0)}")
@@ -302,7 +291,6 @@ class DeepAutoencoder:
     def train_autoencoder(self) -> None:
         self.log.info("Training Deep Autoencoder with PyTorch Lightning...")
 
-        # Prepare data loaders
         train_size = int(len(self.benign_features_scaled) * (1 - self.config.validation_split))
         indices = np.random.permutation(len(self.benign_features_scaled))
         train_indices = indices[:train_size]
@@ -314,7 +302,6 @@ class DeepAutoencoder:
         train_dataset = TensorDataset(train_data)
         val_dataset = TensorDataset(val_data)
 
-        # Use multiprocessing on Linux/Mac, single process on Windows
         num_workers = 4 if os.name != "nt" else 0
 
         train_loader = DataLoader(
@@ -334,7 +321,6 @@ class DeepAutoencoder:
             persistent_workers=True if num_workers > 0 else False,
         )
 
-        # Callbacks
         os.makedirs("./artifacts", exist_ok=True)
         callbacks = [
             EarlyStopping(
@@ -355,7 +341,6 @@ class DeepAutoencoder:
             LearningRateMonitor(logging_interval="epoch"),
         ]
 
-        # Trainer
         trainer = L.Trainer(
             max_epochs=self.config.epochs,
             accelerator="auto",
@@ -367,10 +352,8 @@ class DeepAutoencoder:
             logger=True,
         )
 
-        # Train
         trainer.fit(self.lightning_module, train_loader, val_loader)
 
-        # Load best model
         best_model_path = callbacks[1].best_model_path
         if best_model_path:
             self.lightning_module = AutoencoderLightningModule.load_from_checkpoint(
@@ -379,13 +362,11 @@ class DeepAutoencoder:
             )
             self.log.info(f"Loaded best model from {best_model_path}")
 
-        # Extract training history from trainer
         self.training_history = {
             "loss": [],
             "val_loss": [],
         }
 
-        # Get metrics from trainer's logged metrics
         epochs_trained = trainer.current_epoch + 1 if trainer.current_epoch else self.config.epochs
 
         print(f"Training completed: {epochs_trained} epochs")
@@ -689,7 +670,6 @@ class DeepAutoencoder:
         output_filtered.to_csv(output_path, index=False)
         self.log.info(f"Saved: {output_path}")
 
-        # Save PyTorch model
         model_ae_path = Path("artifacts") / "deep_autoencoder.pt"
         torch.save(
             {
@@ -728,7 +708,6 @@ class DeepAutoencoder:
 
         fig, axes = plt.subplots(2, 3, figsize=(18, 10))
 
-        # Plot 1: Training History (placeholder since Lightning handles this differently)
         ax = axes[0, 0]
         ax.text(
             0.5,

@@ -23,8 +23,6 @@ from typing import List, Optional, Dict, Any, Tuple
 
 
 class MLPModel(nn.Module):
-    """PyTorch MLP Classifier Model"""
-
     def __init__(
         self,
         input_dim: int,
@@ -46,7 +44,6 @@ class MLPModel(nn.Module):
                 layers.append(nn.Dropout(dropout))
             prev_size = size
 
-        # Output layer
         layers.append(nn.Linear(prev_size, n_classes))
         self.network = nn.Sequential(*layers)
 
@@ -55,8 +52,6 @@ class MLPModel(nn.Module):
 
 
 class MLPLightningModule(L.LightningModule):
-    """PyTorch Lightning Module for MLP Training"""
-
     def __init__(
         self,
         model: MLPModel,
@@ -168,7 +163,6 @@ class MLP:
 
         self.log: Logger = Logger("MLP")
 
-        # Device configuration
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def load_data(self) -> None:
@@ -404,7 +398,6 @@ class MLP:
     def train_model(self) -> None:
         self.log.info("Training MLP with PyTorch Lightning...")
 
-        # Prepare data loaders
         train_data = torch.FloatTensor(self.train_features_balanced)
         train_labels = torch.LongTensor(self.train_labels_balanced)
         test_data = torch.FloatTensor(self.test_features)
@@ -413,7 +406,6 @@ class MLP:
         train_dataset = TensorDataset(train_data, train_labels)
         test_dataset = TensorDataset(test_data, test_labels)
 
-        # Use multiprocessing on Linux/Mac, single process on Windows
         num_workers = 4 if os.name != "nt" else 0
 
         train_loader = DataLoader(
@@ -433,7 +425,6 @@ class MLP:
             persistent_workers=True if num_workers > 0 else False,
         )
 
-        # Callbacks
         os.makedirs("./artifacts", exist_ok=True)
         callbacks = [
             EarlyStopping(
@@ -454,7 +445,6 @@ class MLP:
             LearningRateMonitor(logging_interval="epoch"),
         ]
 
-        # Trainer
         trainer = L.Trainer(
             max_epochs=self.config.epochs,
             accelerator="auto",
@@ -465,10 +455,8 @@ class MLP:
             logger=True
         )
 
-        # Train
         trainer.fit(self.lightning_module, train_loader, val_loader)
 
-        # Load best model
         best_model_path = callbacks[1].best_model_path
         if best_model_path:
             self.lightning_module = MLPLightningModule.load_from_checkpoint(
@@ -517,7 +505,6 @@ class MLP:
         os.makedirs("./artifacts", exist_ok=True)
         os.makedirs("./outputs", exist_ok=True)
 
-        # Get prediction probabilities
         self.lightning_module.eval()
         self.lightning_module.to(self.device)
 
@@ -543,7 +530,6 @@ class MLP:
         output_df.to_csv(csv_path, index=False)
         self.log.info(f"Saved: {csv_path}")
 
-        # Save PyTorch model
         model_path = Path("artifacts") / "mlp.pt"
         torch.save(
             {

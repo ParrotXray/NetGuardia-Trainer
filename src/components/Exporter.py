@@ -57,7 +57,6 @@ class Exporter:
 
         model_path = Path("artifacts")
 
-        # Load Deep Autoencoder (PyTorch)
         try:
             ae_path = model_path / "deep_autoencoder.pt"
             checkpoint = torch.load(ae_path, map_location=self.device, weights_only=False)
@@ -76,7 +75,6 @@ class Exporter:
             self.log.error(f"Failed to load Deep Autoencoder: {e}")
             raise
 
-        # Load Random Forest
         try:
             rf_path = model_path / "random_forest.pkl"
             self.rf_model = joblib.load(rf_path)
@@ -85,7 +83,6 @@ class Exporter:
             self.log.error(f"Failed to load Random Forest: {e}")
             raise
 
-        # Load MLP (PyTorch)
         try:
             mlp_path = model_path / "mlp.pt"
             encoder_path = model_path / "label_encoder.pkl"
@@ -107,7 +104,6 @@ class Exporter:
             self.log.error(f"Failed to load MLP: {e}")
             raise
 
-        # Load configuration
         try:
             config_path = model_path / "deep_ae_ensemble_config.pkl"
             ensemble_config = joblib.load(config_path)
@@ -146,13 +142,15 @@ class Exporter:
 
         torch.onnx.export(
             self.deep_ae_model,
-            dummy_input,
+            (dummy_input,),
             self.deep_ae_onnx_path,
             export_params=True,
             opset_version=self.config.opset_version,
             do_constant_folding=True,
             input_names=["input"],
             output_names=["output"],
+            dynamo=False,
+            external_data=False,
         )
 
         self.log.info(f"Saved: {self.deep_ae_onnx_path}")
@@ -201,13 +199,15 @@ class Exporter:
 
         torch.onnx.export(
             self.mlp_model,
-            dummy_input,
+            (dummy_input,),
             self.mlp_onnx_path,
             export_params=True,
             opset_version=self.config.opset_version,
             do_constant_folding=True,
             input_names=["input"],
             output_names=["output"],
+            dynamo=False,
+            external_data=False,
         )
 
         self.log.info(f"Saved: {self.mlp_onnx_path}")
@@ -380,8 +380,8 @@ class Exporter:
         print("Testing Random Forest:")
         session_rf = ort.InferenceSession(str(self.rf_onnx_path))
         rf_output = session_rf.run(None, {"float_input": test_input_scaled})
-        rf_label = rf_output[0][0]  # output_label: [batch] -> scalar
-        rf_proba_matrix = rf_output[1]  # output_probability: [batch, n_classes]
+        rf_label = rf_output[0][0]
+        rf_proba_matrix = rf_output[1]
 
         if rf_proba_matrix.shape[1] > 1:
             rf_proba = (
@@ -401,7 +401,6 @@ class Exporter:
         session_mlp = ort.InferenceSession(str(self.mlp_onnx_path))
         mlp_output = session_mlp.run(None, {"input": test_input_scaled})[0]
 
-        # Apply softmax for PyTorch model output (logits)
         mlp_probs = np.exp(mlp_output[0]) / np.sum(np.exp(mlp_output[0]))
         predicted_class = np.argmax(mlp_probs)
         confidence = mlp_probs[predicted_class]
