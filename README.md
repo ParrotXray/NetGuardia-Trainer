@@ -13,8 +13,8 @@ NetGuardia-Trainer provides a complete pipeline for training network anomaly det
 
 ## Supported Datasets
 
-- [CIC-IDS-2017](./dataset/CIC-IDS2017.zip) - Canadian Institute for Cybersecurity Intrusion Detection Dataset 2017
-- [CIC-IDS-2018](./dataset/CIC-IDS2018.zip) - Canadian Institute for Cybersecurity Intrusion Detection Dataset 2018
+- [CIC-IDS-2017](https://github.com/ParrotXray/NetGuardia-Trainer/releases/download/2.0.0/CIC-IDS2017.zip) - Canadian Institute for Cybersecurity Intrusion Detection Dataset 2017
+- [CIC-IDS-2018](https://github.com/ParrotXray/NetGuardia-Trainer/releases/download/2.0.0/CIC-IDS2018.zip) - Canadian Institute for Cybersecurity Intrusion Detection Dataset 2018
 
 ## Requirements
 
@@ -106,7 +106,7 @@ chmod +x main.py
 ### Pull Pre-built Image
 
 ```bash
-docker pull ghcr.io/parrotxray/netguardia-train:latest
+docker pull ghcr.io/parrotxray/netguardia-train:master
 ```
 
 ### Run with Docker
