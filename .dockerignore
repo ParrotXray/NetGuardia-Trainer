@@ -12,7 +12,6 @@ __pycache__
 dist
 dist-ssr
 *.local
-*.csv
 
 .vscode/*
 !.vscode/extensions.json
@@ -24,3 +23,11 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+src/artifacts/*
+src/exports/*
+src/metadata/*
+src/rawdata/*
+src/plots/*
+.github/*
+*.csv

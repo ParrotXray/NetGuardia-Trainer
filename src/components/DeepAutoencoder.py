@@ -407,6 +407,7 @@ class DeepAutoencoder:
         self.ae_normalization_params = {
             "min": float(ae_mse_benign.min()),
             "max": float(ae_mse_benign.max()),
+            "norm_max": float(np.percentile(ae_mse_benign, 99)),
             "mean": float(ae_mse_benign.mean()),
             "std": float(ae_mse_benign.std()),
             "median": float(np.median(ae_mse_benign)),
@@ -513,7 +514,7 @@ class DeepAutoencoder:
         ae_scores_normalized = (
             self.ae_mse_scores - self.ae_normalization_params["min"]
         ) / (
-            self.ae_normalization_params["max"]
+            self.ae_normalization_params["norm_max"]
             - self.ae_normalization_params["min"]
             + 1e-10
         )
@@ -584,9 +585,9 @@ class DeepAutoencoder:
 
                 if (
                     f1 > best_f1
-                    and prec > 0.5
+                    and prec > self.config.min_precision
                     and fpr < estimate_fpr_limit
-                    and tpr > 0.90
+                    and tpr > self.config.min_tpr
                 ):
                     best_f1 = f1
                     best_threshold = threshold
@@ -618,7 +619,31 @@ class DeepAutoencoder:
                     }
                 )
 
-        self.best_strategy = max(self.strategy_results, key=lambda x: x["f1"])
+        sorted_results = sorted(self.strategy_results, key=lambda x: x["f1"])
+        if self.config.strategy_selection in ["median", "max"]:
+            if self.config.strategy_selection == "median":
+                median_idx = len(sorted_results) // 2
+                self.best_strategy = sorted_results[median_idx]
+            else:
+                self.best_strategy = sorted_results[-1]  # max F1
+        else:
+            raise ValueError(
+                f"Invalid strategy_selection: {self.config.strategy_selection}"
+            )
+
+        best_score = self.best_strategy["score"]
+        precision_levels = {}
+        for percentile in self.config.percentiles:
+            thresh = np.percentile(best_score[self.test_labels == 0], percentile)
+            pred = (best_score > thresh).astype(int)
+            tp = ((self.test_labels == 1) & (pred == 1)).sum()
+            fp = ((self.test_labels == 0) & (pred == 1)).sum()
+            prec = tp / (tp + fp) if (tp + fp) > 0 else 0
+            precision_levels[f"p{percentile}"] = {
+                "threshold": float(thresh),
+                "precision": float(prec),
+            }
+        self.best_strategy["precision_levels"] = precision_levels
 
         print(f"\n{'=' * 60}")
         print(f"Best strategy: {self.best_strategy['name']}")
@@ -627,6 +652,11 @@ class DeepAutoencoder:
         print(f"FPR: {self.best_strategy['fpr']:.2%}")
         print(f"Precision: {self.best_strategy['precision']:.3f}")
         print(f"F1: {self.best_strategy['f1']:.3f}")
+        print(f"\nPrecision Levels (for confidence output):")
+        for level, data in precision_levels.items():
+            print(
+                f"  {level}: threshold={data['threshold']:.4f}, precision={data['precision']:.1%}"
+            )
         print(f"{'=' * 60}\n")
 
     def evaluate_attack_types(self) -> None:
@@ -808,7 +838,7 @@ class DeepAutoencoder:
 
         ax = axes[1, 1]
         ae_score_norm = (self.ae_mse_scores - self.ae_normalization_params["min"]) / (
-            self.ae_normalization_params["max"]
+            self.ae_normalization_params["norm_max"]
             - self.ae_normalization_params["min"]
             + 1e-10
         )

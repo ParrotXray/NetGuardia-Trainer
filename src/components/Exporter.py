@@ -199,10 +199,12 @@ class Exporter:
         input_dim = self.mlp_model.input_dim
         dummy_input = torch.randn(1, input_dim)
 
+        mlp_with_softmax = nn.Sequential(self.mlp_model, nn.Softmax(dim=1))
+
         self.mlp_onnx_path = Path("exports") / "mlp.onnx"
 
         torch.onnx.export(
-            self.mlp_model,
+            mlp_with_softmax,
             (dummy_input,),
             self.mlp_onnx_path,
             export_params=True,
@@ -254,12 +256,16 @@ class Exporter:
             "fpr": float(self.best_strategy["fpr"]),
             "precision": float(self.best_strategy["precision"]),
             "f1": float(self.best_strategy["f1"]),
+            "precision_levels": self.best_strategy.get("precision_levels", {}),
         }
 
         if self.ae_normalization:
             ae_normalization_json = {
                 "min": float(self.ae_normalization["min"]),
                 "max": float(self.ae_normalization["max"]),
+                "norm_max": float(
+                    self.ae_normalization.get("norm_max", self.ae_normalization["max"])
+                ),
                 "mean": float(self.ae_normalization["mean"]),
                 "std": float(self.ae_normalization["std"]),
                 "median": float(self.ae_normalization.get("median", 0.0)),
@@ -274,6 +280,7 @@ class Exporter:
             ae_normalization_json = {
                 "min": 0.0,
                 "max": 1.0,
+                "norm_max": 1.0,
                 "mean": 0.0,
                 "std": 1.0,
                 "median": 0.0,
@@ -323,6 +330,7 @@ class Exporter:
         self.inference_config = {
             "threshold": ensemble_params["threshold"],
             "strategy_name": ensemble_params["strategy_name"],
+            "precision_levels": ensemble_params["precision_levels"],
             "clip_params": clip_params_json,
             "scaler_mean": scaler_params["mean"],
             "scaler_std": scaler_params["std"],
