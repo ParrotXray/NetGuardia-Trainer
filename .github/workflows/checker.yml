@@ -44,13 +44,13 @@ jobs:
         python3 -m compileall .
 
     - name: Run black formatter
-      if: github.event_name == 'push' && github.ref_name == 'main' && steps.verify-changed-files.outputs.changed == 'true'
+      if: github.event_name == 'push' && github.ref_name == 'master' && steps.verify-changed-files.outputs.changed == 'true'
       run: |
         black src
         echo "Black formatting completed"
 
     - name: Run isort import sorter
-      if: github.event_name == 'push' && github.ref_name == 'main' && steps.verify-changed-files.outputs.changed == 'true'
+      if: github.event_name == 'push' && github.ref_name == 'master' && steps.verify-changed-files.outputs.changed == 'true'
       run: |
         isort src
         echo "Import sorting completed"
@@ -87,7 +87,7 @@ jobs:
         echo "All checks passed! Code is ready for commit."
 
     - name: Commit changes
-      if: github.event_name == 'push' && github.ref_name == 'main' && steps.verify-changed-files.outputs.changed == 'true'
+      if: github.event_name == 'push' && github.ref_name == 'master' && steps.verify-changed-files.outputs.changed == 'true'
       run: |
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
@@ -95,7 +95,7 @@ jobs:
         git commit -m "Auto-format code with black and isort"
 
     - name: Push changes
-      if: github.event_name == 'push' && github.ref_name == 'main' && steps.verify-changed-files.outputs.changed == 'true'
+      if: github.event_name == 'push' && github.ref_name == 'master' && steps.verify-changed-files.outputs.changed == 'true'
       uses: ad-m/github-push-action@master
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
