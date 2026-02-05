@@ -44,7 +44,7 @@ jobs:
         python3 -m compileall .
 
     - name: Run black formatter
-      if: github.event_name == 'push' && github.ref_name == 'master' && steps.verify-changed-files.outputs.changed == 'true'
+      if: github.event_name == 'push' && github.ref_name == 'master' && steps.verify-changed-files.outputs.changed == 'false'
       run: |
         black src
         echo "Black formatting completed"
