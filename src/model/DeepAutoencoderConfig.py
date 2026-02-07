@@ -55,9 +55,14 @@ class DeepAutoencoderConfig:
             rf_random_state: Random seed for reproducibility.
             rf_train_samples: Number of samples used for training Random Forest.
 
-        Ensemble Configuration:
-            ensemble_strategies: List of weight ratios for combining AE and RF scores.
-            percentiles: Percentile thresholds for anomaly score evaluation.
+        Weighted Voting Ensemble Configuration:
+            ae_threshold_high_percentile: Percentile for "very anomalous" AE threshold.
+            ae_threshold_medium_percentile: Percentile for "anomalous" AE threshold.
+            ae_threshold_low_percentile: Percentile for "suspicious" AE threshold.
+            rf_threshold_high: RF attack probability threshold for high confidence.
+            rf_threshold_medium: RF attack probability threshold for medium confidence.
+            ae_voting_weight: AE weight in fallback weighted voting.
+            rf_voting_weight: RF weight in fallback weighted voting.
     """
 
     # Data Preprocessing Parameters
@@ -96,22 +101,19 @@ class DeepAutoencoderConfig:
     rf_random_state: int = 42
     rf_train_samples: int = 50000
 
-    # Ensemble Configuration
-    ensemble_strategies: List[float] = field(
-        default_factory=lambda: [0.4, 0.5, 0.6, 0.7, 0.8]
-    )
+    # Weighted Voting Ensemble Configuration
+    # AE threshold percentiles (computed from benign training MSE)
+    ae_threshold_high_percentile: float = 99.5  # Very anomalous
+    ae_threshold_medium_percentile: float = 99.0  # Anomalous
+    ae_threshold_low_percentile: float = 97.0  # Suspicious
 
-    # Anomaly Score Thresholds
-    percentiles: List[float] = field(
-        default_factory=lambda: [97.0, 98.0, 99.0, 99.5, 99.7, 99.9]
-    )
+    # RF confidence thresholds (applied to attack probability)
+    rf_threshold_high: float = 0.85  # High confidence
+    rf_threshold_medium: float = 0.6  # Medium confidence
 
-    # Confidence Thresholds (for reducing sensitivity)
-    min_precision: float = 0.6  # Minimum precision required (higher = less sensitive)
-    min_tpr: float = (
-        0.80  # Minimum true positive rate (lower = allows more missed attacks)
-    )
-    strategy_selection: str = "max"  # "max" for highest F1, "median" for balanced
+    # Fallback voting weights (when decision matrix is inconclusive)
+    ae_voting_weight: float = 0.4
+    rf_voting_weight: float = 0.6
 
     # output_csv_name: str = "output_deep_ae_ensemble"
     # output_model_ae: str = "deep_autoencoder"

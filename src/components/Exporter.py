@@ -251,27 +251,34 @@ class Exporter:
 
         ensemble_params = {
             "strategy_name": self.best_strategy["name"],
-            "threshold": float(self.best_strategy["threshold"]),
             "tpr": float(self.best_strategy["tpr"]),
             "fpr": float(self.best_strategy["fpr"]),
             "precision": float(self.best_strategy["precision"]),
             "f1": float(self.best_strategy["f1"]),
-            "precision_levels": self.best_strategy.get("precision_levels", {}),
+            "ae_thresholds": self.best_strategy.get("ae_thresholds", {}),
+            "rf_thresholds": self.best_strategy.get("rf_thresholds", {}),
+            "voting_weights": self.best_strategy.get("voting_weights", {}),
         }
 
         if self.ae_normalization:
             ae_normalization_json = {
                 "min": float(self.ae_normalization["min"]),
                 "max": float(self.ae_normalization["max"]),
-                "norm_max": float(
-                    self.ae_normalization.get("norm_max", self.ae_normalization["max"])
-                ),
                 "mean": float(self.ae_normalization["mean"]),
                 "std": float(self.ae_normalization["std"]),
                 "median": float(self.ae_normalization.get("median", 0.0)),
                 "p90": float(self.ae_normalization.get("p90", 0.0)),
                 "p95": float(self.ae_normalization.get("p95", 0.0)),
                 "p99": float(self.ae_normalization.get("p99", 0.0)),
+                "ae_threshold_high": float(
+                    self.ae_normalization.get("ae_threshold_high", 0.0)
+                ),
+                "ae_threshold_medium": float(
+                    self.ae_normalization.get("ae_threshold_medium", 0.0)
+                ),
+                "ae_threshold_low": float(
+                    self.ae_normalization.get("ae_threshold_low", 0.0)
+                ),
             }
         else:
             self.log.warning(
@@ -280,13 +287,15 @@ class Exporter:
             ae_normalization_json = {
                 "min": 0.0,
                 "max": 1.0,
-                "norm_max": 1.0,
                 "mean": 0.0,
                 "std": 1.0,
                 "median": 0.0,
                 "p90": 0.0,
                 "p95": 0.0,
                 "p99": 0.0,
+                "ae_threshold_high": 0.0,
+                "ae_threshold_medium": 0.0,
+                "ae_threshold_low": 0.0,
             }
 
         attack_labels = {
@@ -328,9 +337,10 @@ class Exporter:
         }
 
         self.inference_config = {
-            "threshold": ensemble_params["threshold"],
             "strategy_name": ensemble_params["strategy_name"],
-            "precision_levels": ensemble_params["precision_levels"],
+            "ae_thresholds": ensemble_params["ae_thresholds"],
+            "rf_thresholds": ensemble_params["rf_thresholds"],
+            "voting_weights": ensemble_params["voting_weights"],
             "clip_params": clip_params_json,
             "scaler_mean": scaler_params["mean"],
             "scaler_std": scaler_params["std"],
@@ -423,35 +433,43 @@ class Exporter:
         print(f"Confidence: {confidence:.6f}")
 
         print()
-        print("Testing Ensemble:")
-        ae_normalization_json = self.full_config["ae_normalization"]
-        ae_score_norm = (ae_mse - ae_normalization_json["min"]) / (
-            ae_normalization_json["max"] - ae_normalization_json["min"] + 1e-10
-        )
-        ae_score_norm = np.clip(ae_score_norm, 0, 1)
-        rf_score_norm = rf_proba
-
-        print(f"AE Score (normalized): {ae_score_norm:.6f}")
-        print(f"RF Score: {rf_score_norm:.6f}")
-
+        print("Testing Weighted Voting Ensemble:")
         ensemble_params = self.full_config["ensemble"]
-        strategy_name = ensemble_params["strategy_name"]
+        ae_thresholds = ensemble_params["ae_thresholds"]
+        rf_thresholds = ensemble_params["rf_thresholds"]
+        voting_weights = ensemble_params["voting_weights"]
 
-        if strategy_name.startswith("W_"):
-            parts = strategy_name.split("_")[1].split(":")
-            w1, w2 = int(parts[0]) / 10, int(parts[1]) / 10
+        print(f"AE MSE: {ae_mse:.6f}")
+        print(f"RF Attack Probability: {rf_proba:.6f}")
+        print(f"AE Thresholds: low={ae_thresholds['low']:.6f}, "
+              f"medium={ae_thresholds['medium']:.6f}, high={ae_thresholds['high']:.6f}")
+        print(f"RF Thresholds: medium={rf_thresholds['medium']}, "
+              f"high={rf_thresholds['high']}")
 
-            if "ae" in strategy_name.lower() or w1 > w2:
-                ensemble_score = w1 * ae_score_norm + w2 * rf_score_norm
-            else:
-                ensemble_score = w1 * rf_score_norm + w2 * ae_score_norm
+        # Weighted voting decision matrix
+        if ae_mse < ae_thresholds["low"] and rf_proba < rf_thresholds["medium"]:
+            is_anomaly = False
+            decision = "both_normal"
+        elif ae_mse > ae_thresholds["high"] and rf_proba > rf_thresholds["high"]:
+            is_anomaly = True
+            decision = "both_attack"
+        elif ae_mse > ae_thresholds["high"] and rf_proba < rf_thresholds["medium"]:
+            is_anomaly = True
+            decision = "ae_anomaly_rf_unsure"
+        elif ae_mse < ae_thresholds["medium"] and rf_proba > rf_thresholds["high"]:
+            is_anomaly = (rf_label == 1)
+            decision = "ae_normal_rf_confident"
+        elif ae_mse > ae_thresholds["medium"] and rf_proba > rf_thresholds["medium"]:
+            is_anomaly = (rf_label == 1)
+            decision = "both_medium"
         else:
-            ensemble_score = (rf_score_norm + ae_score_norm) / 2.0
+            ae_vote = 1.0 if ae_mse > ae_thresholds["medium"] else 0.0
+            rf_vote = 1.0 if rf_proba > 0.5 else 0.0
+            weighted = ae_vote * voting_weights["ae"] + rf_vote * voting_weights["rf"]
+            is_anomaly = weighted > 0.5
+            decision = "fallback"
 
-        is_anomaly = ensemble_score > ensemble_params["threshold"]
-
-        print(f"Ensemble Score: {ensemble_score:.6f}")
-        print(f"Threshold: {ensemble_params['threshold']:.6f}")
+        print(f"Decision: {decision}")
         print(f"Is Anomaly: {is_anomaly}")
 
         if is_anomaly:
@@ -473,9 +491,7 @@ class Exporter:
         print(f"MLP: {len(self.label_encoder.classes_)} attack classes")
 
         ensemble_params = self.full_config["ensemble"]
-        print(
-            f"Ensemble: {ensemble_params['strategy_name']} (threshold={ensemble_params['threshold']:.4f})"
-        )
+        print(f"Ensemble: {ensemble_params['strategy_name']}")
 
         print()
         print("Performance Metrics:")
@@ -483,6 +499,19 @@ class Exporter:
         print(f"FPR: {ensemble_params['fpr']:.2%}")
         print(f"Precision: {ensemble_params['precision']:.3f}")
         print(f"F1-Score: {ensemble_params['f1']:.3f}")
+
+        ae_thresholds = ensemble_params.get("ae_thresholds", {})
+        rf_thresholds = ensemble_params.get("rf_thresholds", {})
+        voting_weights = ensemble_params.get("voting_weights", {})
+        print()
+        print("Weighted Voting Parameters:")
+        print(f"AE Thresholds: low={ae_thresholds.get('low', 'N/A')}, "
+              f"medium={ae_thresholds.get('medium', 'N/A')}, "
+              f"high={ae_thresholds.get('high', 'N/A')}")
+        print(f"RF Thresholds: medium={rf_thresholds.get('medium', 'N/A')}, "
+              f"high={rf_thresholds.get('high', 'N/A')}")
+        print(f"Fallback Weights: AE={voting_weights.get('ae', 'N/A')}, "
+              f"RF={voting_weights.get('rf', 'N/A')}")
 
         ae_norm = self.full_config["ae_normalization"]
         print()

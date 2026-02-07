@@ -169,8 +169,7 @@ class DeepAutoencoder:
 
         self.rf_probabilities: Optional[np.ndarray] = None
 
-        self.ensemble_strategies: Optional[Dict[str, np.ndarray]] = None
-        self.strategy_results: Optional[List[Dict[str, Any]]] = []
+        self.voting_predictions: Optional[np.ndarray] = None
         self.best_strategy: Optional[Dict[str, Any]] = None
 
         self.training_history: Optional[Dict[str, List[float]]] = None
@@ -404,21 +403,33 @@ class DeepAutoencoder:
             np.square(self.benign_features_scaled - ae_reconstructions), axis=1
         )
 
+        ae_threshold_high = float(
+            np.percentile(ae_mse_benign, self.config.ae_threshold_high_percentile)
+        )
+        ae_threshold_medium = float(
+            np.percentile(ae_mse_benign, self.config.ae_threshold_medium_percentile)
+        )
+        ae_threshold_low = float(
+            np.percentile(ae_mse_benign, self.config.ae_threshold_low_percentile)
+        )
+
         self.ae_normalization_params = {
             "min": float(ae_mse_benign.min()),
             "max": float(ae_mse_benign.max()),
-            "norm_max": float(np.percentile(ae_mse_benign, 99)),
             "mean": float(ae_mse_benign.mean()),
             "std": float(ae_mse_benign.std()),
             "median": float(np.median(ae_mse_benign)),
             "p90": float(np.percentile(ae_mse_benign, 90)),
             "p95": float(np.percentile(ae_mse_benign, 95)),
             "p99": float(np.percentile(ae_mse_benign, 99)),
+            "ae_threshold_high": ae_threshold_high,
+            "ae_threshold_medium": ae_threshold_medium,
+            "ae_threshold_low": ae_threshold_low,
         }
 
         print(f"AE MSE statistics (BENIGN training set):")
         for key, value in self.ae_normalization_params.items():
-            print(f"{key.upper()}: {value:.6f}")
+            print(f"  {key}: {value:.6f}")
 
     def predict_autoencoder(self) -> None:
         self.log.info("Calculating Deep AE anomaly scores...")
@@ -508,155 +519,140 @@ class DeepAutoencoder:
         )[:, 1]
         self.log.info("RF prediction completed")
 
-    def create_ensemble_strategies(self) -> None:
-        self.log.info("Creating Ensemble strategies...")
+    def create_weighted_voting(self) -> None:
+        self.log.info("Creating Weighted Voting ensemble predictions...")
 
-        ae_scores_normalized = (
-            self.ae_mse_scores - self.ae_normalization_params["min"]
-        ) / (
-            self.ae_normalization_params["norm_max"]
-            - self.ae_normalization_params["min"]
-            + 1e-10
-        )
-        ae_scores_normalized = np.clip(ae_scores_normalized, 0, 1)
-        rf_scores_normalized = self.rf_probabilities
+        ae_threshold_high = self.ae_normalization_params["ae_threshold_high"]
+        ae_threshold_medium = self.ae_normalization_params["ae_threshold_medium"]
+        ae_threshold_low = self.ae_normalization_params["ae_threshold_low"]
+        rf_threshold_high = self.config.rf_threshold_high
+        rf_threshold_medium = self.config.rf_threshold_medium
 
         self.log.info(
-            f"AE Score normalized range: "
-            f"[{ae_scores_normalized.min():.4f}, {ae_scores_normalized.max():.4f}]"
+            f"AE thresholds: low={ae_threshold_low:.6f}, "
+            f"medium={ae_threshold_medium:.6f}, high={ae_threshold_high:.6f}"
         )
         self.log.info(
-            f"RF Score range: "
-            f"[{rf_scores_normalized.min():.4f}, {rf_scores_normalized.max():.4f}]"
+            f"RF thresholds: medium={rf_threshold_medium}, high={rf_threshold_high}"
         )
 
-        self.ensemble_strategies = {}
+        rf_pred = self.random_forest_model.predict(self.test_features_scaled)
+        rf_attack_prob = self.rf_probabilities  # P(attack)
 
-        for ae_weight in self.config.ensemble_strategies:
-            rf_weight = 1 - ae_weight
-            name = f"W_{int(ae_weight * 10)}:{int(rf_weight * 10)}"
-            self.ensemble_strategies[name] = (
-                ae_weight * ae_scores_normalized + rf_weight * rf_scores_normalized
-            )
+        n_samples = len(self.ae_mse_scores)
+        voting_predictions = np.zeros(n_samples, dtype=np.int32)
 
-        self.ensemble_strategies["Max"] = np.maximum(
-            ae_scores_normalized, rf_scores_normalized
-        )
-        self.ensemble_strategies["Min"] = np.minimum(
-            ae_scores_normalized, rf_scores_normalized
-        )
-        self.ensemble_strategies["Product"] = (
-            ae_scores_normalized * rf_scores_normalized
-        )
-        self.ensemble_strategies["Average"] = (
-            ae_scores_normalized + rf_scores_normalized
-        ) / 2
+        category_counts = {
+            "both_normal": 0,
+            "both_attack": 0,
+            "ae_anomaly_rf_unsure": 0,
+            "ae_normal_rf_confident": 0,
+            "both_medium": 0,
+            "fallback_attack": 0,
+            "fallback_benign": 0,
+        }
 
-    def evaluate_strategies(self) -> None:
-        self.log.info("Evaluating strategies...")
+        for i in range(n_samples):
+            mse = self.ae_mse_scores[i]
+            prob = rf_attack_prob[i]
 
-        header = f"{'Strategy':<12} {'Threshold':>10} {'TPR':>7} {'FPR':>7} {'Prec':>7} {'F1':>7}"
-        print(header)
-        print("-" * 60)
+            if mse < ae_threshold_low and prob < rf_threshold_medium:
+                # Both say normal
+                voting_predictions[i] = 0
+                category_counts["both_normal"] += 1
 
-        for name, score in self.ensemble_strategies.items():
-            thresholds = np.percentile(
-                score[self.test_labels == 0], self.config.percentiles
-            )
+            elif mse > ae_threshold_high and prob > rf_threshold_high:
+                # Both very confident it's an attack
+                voting_predictions[i] = 1
+                category_counts["both_attack"] += 1
 
-            best_f1 = 0
-            best_threshold = None
-            best_metrics = None
+            elif mse > ae_threshold_high and prob < rf_threshold_medium:
+                # AE very anomalous but RF unsure -> unknown attack
+                voting_predictions[i] = 1
+                category_counts["ae_anomaly_rf_unsure"] += 1
 
-            for percentile, threshold in zip(self.config.percentiles, thresholds):
-                pred = (score > threshold).astype(int)
+            elif mse < ae_threshold_medium and prob > rf_threshold_high:
+                # AE not very anomalous but RF confident -> trust RF
+                voting_predictions[i] = rf_pred[i]
+                category_counts["ae_normal_rf_confident"] += 1
 
-                tp = ((self.test_labels == 1) & (pred == 1)).sum()
-                fp = ((self.test_labels == 0) & (pred == 1)).sum()
-                fn = ((self.test_labels == 1) & (pred == 0)).sum()
-                tn = ((self.test_labels == 0) & (pred == 0)).sum()
+            elif mse > ae_threshold_medium and prob > rf_threshold_medium:
+                # Both medium confidence -> trust RF
+                voting_predictions[i] = rf_pred[i]
+                category_counts["both_medium"] += 1
 
-                tpr = tp / (tp + fn) if (tp + fn) > 0 else 0
-                fpr = fp / (fp + tn) if (fp + tn) > 0 else 0
-                prec = tp / (tp + fp) if (tp + fp) > 0 else 0
-                f1 = 2 * prec * tpr / (prec + tpr) if (prec + tpr) > 0 else 0
-
-                estimate_fpr_limit = ((100 - percentile) / 100) * 1.5
-
-                if (
-                    f1 > best_f1
-                    and prec > self.config.min_precision
-                    and fpr < estimate_fpr_limit
-                    and tpr > self.config.min_tpr
-                ):
-                    best_f1 = f1
-                    best_threshold = threshold
-                    best_metrics = {
-                        "tp": int(tp),
-                        "fp": int(fp),
-                        "fn": int(fn),
-                        "tn": int(tn),
-                        "tpr": float(tpr),
-                        "fpr": float(fpr),
-                        "precision": float(prec),
-                        "f1": float(f1),
-                    }
-
-            if best_metrics:
-                result_line = (
-                    f"{name:<12} {best_threshold:>10.4f} {best_metrics['tpr']:>6.1%} "
-                    f"{best_metrics['fpr']:>6.1%} {best_metrics['precision']:>6.2f} "
-                    f"{best_metrics['f1']:>6.3f}"
-                )
-                print(result_line)
-
-                self.strategy_results.append(
-                    {
-                        "name": name,
-                        "score": score,
-                        "threshold": best_threshold,
-                        **best_metrics,
-                    }
-                )
-
-        sorted_results = sorted(self.strategy_results, key=lambda x: x["f1"])
-        if self.config.strategy_selection in ["median", "max"]:
-            if self.config.strategy_selection == "median":
-                median_idx = len(sorted_results) // 2
-                self.best_strategy = sorted_results[median_idx]
             else:
-                self.best_strategy = sorted_results[-1]  # max F1
-        else:
-            raise ValueError(
-                f"Invalid strategy_selection: {self.config.strategy_selection}"
-            )
+                # Inconclusive -> fallback weighted voting
+                ae_vote = 1.0 if mse > ae_threshold_medium else 0.0
+                rf_vote = 1.0 if prob > 0.5 else 0.0
 
-        best_score = self.best_strategy["score"]
-        precision_levels = {}
-        for percentile in self.config.percentiles:
-            thresh = np.percentile(best_score[self.test_labels == 0], percentile)
-            pred = (best_score > thresh).astype(int)
-            tp = ((self.test_labels == 1) & (pred == 1)).sum()
-            fp = ((self.test_labels == 0) & (pred == 1)).sum()
-            prec = tp / (tp + fp) if (tp + fp) > 0 else 0
-            precision_levels[f"p{percentile}"] = {
-                "threshold": float(thresh),
-                "precision": float(prec),
-            }
-        self.best_strategy["precision_levels"] = precision_levels
+                weighted = (
+                    ae_vote * self.config.ae_voting_weight
+                    + rf_vote * self.config.rf_voting_weight
+                )
+                if weighted > 0.5:
+                    voting_predictions[i] = rf_pred[i]
+                    category_counts["fallback_attack"] += 1
+                else:
+                    voting_predictions[i] = 0
+                    category_counts["fallback_benign"] += 1
+
+        self.voting_predictions = voting_predictions
+
+        print(f"\nWeighted Voting decision breakdown:")
+        for category, count in category_counts.items():
+            pct = count / n_samples * 100
+            print(f"  {category:<25} {count:>8,} ({pct:>5.1f}%)")
+
+    def evaluate_voting(self) -> None:
+        self.log.info("Evaluating Weighted Voting results...")
+
+        pred = self.voting_predictions
+
+        tp = int(((self.test_labels == 1) & (pred == 1)).sum())
+        fp = int(((self.test_labels == 0) & (pred == 1)).sum())
+        fn = int(((self.test_labels == 1) & (pred == 0)).sum())
+        tn = int(((self.test_labels == 0) & (pred == 0)).sum())
+
+        tpr = tp / (tp + fn) if (tp + fn) > 0 else 0
+        fpr = fp / (fp + tn) if (fp + tn) > 0 else 0
+        prec = tp / (tp + fp) if (tp + fp) > 0 else 0
+        f1 = 2 * prec * tpr / (prec + tpr) if (prec + tpr) > 0 else 0
+
+        self.best_strategy = {
+            "name": "WeightedVoting",
+            "predictions": pred,
+            "tp": tp,
+            "fp": fp,
+            "fn": fn,
+            "tn": tn,
+            "tpr": float(tpr),
+            "fpr": float(fpr),
+            "precision": float(prec),
+            "f1": float(f1),
+            "ae_thresholds": {
+                "high": self.ae_normalization_params["ae_threshold_high"],
+                "medium": self.ae_normalization_params["ae_threshold_medium"],
+                "low": self.ae_normalization_params["ae_threshold_low"],
+            },
+            "rf_thresholds": {
+                "high": self.config.rf_threshold_high,
+                "medium": self.config.rf_threshold_medium,
+            },
+            "voting_weights": {
+                "ae": self.config.ae_voting_weight,
+                "rf": self.config.rf_voting_weight,
+            },
+        }
 
         print(f"\n{'=' * 60}")
-        print(f"Best strategy: {self.best_strategy['name']}")
-        print(f"Threshold: {self.best_strategy['threshold']:.4f}")
-        print(f"TPR: {self.best_strategy['tpr']:.2%}")
-        print(f"FPR: {self.best_strategy['fpr']:.2%}")
-        print(f"Precision: {self.best_strategy['precision']:.3f}")
-        print(f"F1: {self.best_strategy['f1']:.3f}")
-        print(f"\nPrecision Levels (for confidence output):")
-        for level, data in precision_levels.items():
-            print(
-                f"  {level}: threshold={data['threshold']:.4f}, precision={data['precision']:.1%}"
-            )
+        print(f"Weighted Voting Ensemble Results")
+        print(f"{'=' * 60}")
+        print(f"TP: {tp:,}  FP: {fp:,}  FN: {fn:,}  TN: {tn:,}")
+        print(f"TPR (Recall): {tpr:.2%}")
+        print(f"FPR:          {fpr:.2%}")
+        print(f"Precision:    {prec:.3f}")
+        print(f"F1-Score:     {f1:.3f}")
         print(f"{'=' * 60}\n")
 
     def evaluate_attack_types(self) -> None:
@@ -668,9 +664,7 @@ class DeepAutoencoder:
 
         for attack_type in sorted(attack_labels.unique()):
             mask = self.labels == attack_type
-            detected = (
-                self.best_strategy["score"][mask] > self.best_strategy["threshold"]
-            ).sum()
+            detected = (self.best_strategy["predictions"][mask] == 1).sum()
             total = mask.sum()
             rate = detected / total if total > 0 else 0
 
@@ -689,10 +683,7 @@ class DeepAutoencoder:
         output = self.features.copy()
         output["deep_ae_mse"] = self.ae_mse_scores
         output["rf_proba"] = self.rf_probabilities
-        output["ensemble_score"] = self.best_strategy["score"]
-        output["ensemble_anomaly"] = (
-            self.best_strategy["score"] > self.best_strategy["threshold"]
-        ).astype(int)
+        output["ensemble_anomaly"] = self.best_strategy["predictions"]
         output["Label"] = self.labels.values
 
         attack_anomaly_mask = (output["ensemble_anomaly"] == 1) & (
@@ -728,11 +719,16 @@ class DeepAutoencoder:
         joblib.dump(self.random_forest_model, model_rf_path)
         self.log.info(f"Saved: {model_rf_path}")
 
+        best_strategy_serializable = {
+            k: v
+            for k, v in self.best_strategy.items()
+            if k != "predictions"
+        }
+
         config_data = {
             "scaler": self.scaler,
             "clip_params": self.clip_params,
-            "best": self.best_strategy,
-            "results": self.strategy_results,
+            "best": best_strategy_serializable,
             "encoding_dim": self.config.encoding_dim,
             "ae_normalization": self.ae_normalization_params,
         }
@@ -748,65 +744,51 @@ class DeepAutoencoder:
 
         fig, axes = plt.subplots(2, 3, figsize=(18, 10))
 
+        # AE MSE distribution with thresholds
         ax = axes[0, 0]
-        ax.text(
-            0.5,
-            0.5,
-            "Training completed\nwith PyTorch Lightning",
-            ha="center",
-            va="center",
-            fontsize=12,
-        )
-        ax.set_xlabel("Epoch")
-        ax.set_ylabel("Loss")
-        ax.set_title("Deep AE Training History")
-        ax.grid(alpha=0.3)
-
-        ax = axes[0, 1]
         bins = 50
-        ax.hist(
-            self.best_strategy["score"][self.test_labels == 0],
-            bins=bins,
-            alpha=0.7,
-            label="BENIGN",
-            color="green",
-            density=True,
-        )
-        ax.hist(
-            self.best_strategy["score"][self.test_labels == 1],
-            bins=bins,
-            alpha=0.7,
-            label="Attack",
-            color="red",
-            density=True,
-        )
-        ax.axvline(
-            self.best_strategy["threshold"],
-            color="black",
-            linestyle="--",
-            linewidth=2,
-            label="Threshold",
-        )
-        ax.set_xlabel("Ensemble Score")
-        ax.set_title("Score Distribution")
-        ax.legend()
+        ae_benign = self.ae_mse_scores[self.test_labels == 0]
+        ae_attack = self.ae_mse_scores[self.test_labels == 1]
+        ax.hist(ae_benign, bins=bins, alpha=0.7, label="BENIGN", color="green", density=True)
+        ax.hist(ae_attack, bins=bins, alpha=0.7, label="Attack", color="red", density=True)
+        for name, val in self.best_strategy["ae_thresholds"].items():
+            ax.axvline(val, linestyle="--", linewidth=1.5, label=f"AE {name}")
+        ax.set_xlabel("AE MSE")
+        ax.set_title("AE MSE Distribution + Thresholds")
+        ax.legend(fontsize=7)
         ax.grid(alpha=0.3)
 
+        # RF probability distribution with thresholds
+        ax = axes[0, 1]
+        rf_benign = self.rf_probabilities[self.test_labels == 0]
+        rf_attack = self.rf_probabilities[self.test_labels == 1]
+        ax.hist(rf_benign, bins=bins, alpha=0.7, label="BENIGN", color="green", density=True)
+        ax.hist(rf_attack, bins=bins, alpha=0.7, label="Attack", color="red", density=True)
+        for name, val in self.best_strategy["rf_thresholds"].items():
+            ax.axvline(val, linestyle="--", linewidth=1.5, label=f"RF {name}")
+        ax.set_xlabel("RF Attack Probability")
+        ax.set_title("RF Probability Distribution + Thresholds")
+        ax.legend(fontsize=7)
+        ax.grid(alpha=0.3)
+
+        # Voting metrics summary
         ax = axes[0, 2]
-        top_strategies = sorted(
-            self.strategy_results, key=lambda x: x["f1"], reverse=True
-        )[:8]
-        names = [r["name"] for r in top_strategies]
-        f1s = [r["f1"] for r in top_strategies]
-        colors = [
-            "gold" if r["name"] == self.best_strategy["name"] else "steelblue"
-            for r in top_strategies
-        ]
-        ax.barh(names, f1s, color=colors)
-        ax.set_xlabel("F1-Score")
-        ax.set_title("Ensemble Strategies")
+        metrics = {
+            "TPR": self.best_strategy["tpr"],
+            "Precision": self.best_strategy["precision"],
+            "F1": self.best_strategy["f1"],
+            "1-FPR": 1 - self.best_strategy["fpr"],
+        }
+        bars = ax.barh(list(metrics.keys()), list(metrics.values()), color="steelblue")
+        ax.set_xlim(0, 1)
+        for bar, val in zip(bars, metrics.values()):
+            ax.text(bar.get_width() + 0.01, bar.get_y() + bar.get_height() / 2,
+                    f"{val:.3f}", va="center", fontsize=10)
+        ax.set_xlabel("Value")
+        ax.set_title("Weighted Voting Metrics")
         ax.grid(alpha=0.3, axis="x")
 
+        # Confusion matrix
         ax = axes[1, 0]
         cm = np.array(
             [
@@ -834,34 +816,34 @@ class DeepAutoencoder:
         ax.set_yticks([0, 1])
         ax.set_xticklabels(["Normal", "Attack"])
         ax.set_yticklabels(["Normal", "Attack"])
-        ax.set_title(f'Confusion Matrix ({self.best_strategy["name"]})')
+        ax.set_title("Confusion Matrix (WeightedVoting)")
 
+        # AE MSE vs RF probability scatter with decision regions
         ax = axes[1, 1]
-        ae_score_norm = (self.ae_mse_scores - self.ae_normalization_params["min"]) / (
-            self.ae_normalization_params["norm_max"]
-            - self.ae_normalization_params["min"]
-            + 1e-10
-        )
-        ae_score_norm = np.clip(ae_score_norm, 0, 1)
-
-        sample_size = min(10000, len(ae_score_norm))
-        sample_idx = np.random.choice(len(ae_score_norm), sample_size, replace=False)
+        sample_size = min(10000, len(self.ae_mse_scores))
+        sample_idx = np.random.choice(len(self.ae_mse_scores), sample_size, replace=False)
         colors_scatter = [
             "red" if self.test_labels.iloc[i] == 1 else "green" for i in sample_idx
         ]
         ax.scatter(
-            ae_score_norm[sample_idx],
+            self.ae_mse_scores[sample_idx],
             self.rf_probabilities[sample_idx],
             c=colors_scatter,
             alpha=0.3,
             s=1,
         )
-        ax.plot([0, 1], [0, 1], "k--", linewidth=1)
-        ax.set_xlabel("Deep AE Score (normalized)")
-        ax.set_ylabel("RF Score (probability)")
-        ax.set_title("AE vs RF Scores")
+        ae_thresh = self.best_strategy["ae_thresholds"]
+        rf_thresh = self.best_strategy["rf_thresholds"]
+        for name, val in ae_thresh.items():
+            ax.axvline(val, color="blue", linestyle="--", alpha=0.5, linewidth=0.8)
+        for name, val in rf_thresh.items():
+            ax.axhline(val, color="orange", linestyle="--", alpha=0.5, linewidth=0.8)
+        ax.set_xlabel("AE MSE")
+        ax.set_ylabel("RF Attack Probability")
+        ax.set_title("AE vs RF (Decision Regions)")
         ax.grid(alpha=0.3)
 
+        # RF feature importance
         ax = axes[1, 2]
         feature_importance = self.random_forest_model.feature_importances_
         top_10_idx = np.argsort(feature_importance)[-10:]
