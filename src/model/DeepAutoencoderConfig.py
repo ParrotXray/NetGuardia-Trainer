@@ -27,6 +27,9 @@ class DeepAutoencoderConfig:
             winsorize_lower: Lower percentile for winsorization to handle outliers.
             winsorize_upper: Upper percentile for winsorization to handle outliers.
             fill_value: Value used to fill missing or invalid entries.
+            test_split: Fraction of data for test set (final evaluation).
+            val_split: Fraction of remaining data for validation (threshold learning).
+            split_random_state: Random seed for data splitting.
 
         Autoencoder Architecture:
             encoding_dim: Dimension of the bottleneck (latent) layer.
@@ -71,6 +74,11 @@ class DeepAutoencoderConfig:
     winsorize_lower: float = 0.005
     winsorize_upper: float = 0.995
     fill_value: float = 0.0
+
+    # Data Split (train/val/test for RF + ensemble)
+    test_split: float = 0.2  # 20% for final evaluation
+    val_split: float = 0.2  # 20% for threshold learning
+    split_random_state: int = 42
 
     # Autoencoder Architecture Parameters
     encoding_dim: int = 16

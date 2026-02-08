@@ -17,6 +17,7 @@ from model import DeepAutoencoderConfig
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
 import joblib
 import matplotlib.pyplot as plt
 
@@ -152,12 +153,24 @@ class DeepAutoencoder:
         self.binary_labels: Optional[pd.Series] = None
 
         self.benign_features: Optional[pd.DataFrame] = None
+
+        self.train_features: Optional[pd.DataFrame] = None
+        self.train_labels: Optional[pd.Series] = None
+        self.train_labels_orig: Optional[pd.Series] = None
+
+        self.val_features: Optional[pd.DataFrame] = None
+        self.val_labels: Optional[pd.Series] = None
+        self.val_labels_orig: Optional[pd.Series] = None
+
         self.test_features: Optional[pd.DataFrame] = None
         self.test_labels: Optional[pd.Series] = None
+        self.test_labels_orig: Optional[pd.Series] = None
 
         self.scaler: Optional[StandardScaler] = None
         self.clip_params: Optional[Dict[str, Dict[str, float]]] = None
         self.benign_features_scaled: Optional[np.ndarray] = None
+        self.train_features_scaled: Optional[np.ndarray] = None
+        self.val_features_scaled: Optional[np.ndarray] = None
         self.test_features_scaled: Optional[np.ndarray] = None
 
         self.autoencoder_model: Optional[AutoencoderModel] = None
@@ -165,8 +178,10 @@ class DeepAutoencoder:
         self.random_forest_model: Optional[RandomForestClassifier] = None
 
         self.ae_normalization_params: Optional[Dict[str, float]] = None
+        self.ae_mse_scores_val: Optional[np.ndarray] = None
         self.ae_mse_scores: Optional[np.ndarray] = None
 
+        self.rf_probabilities_val: Optional[np.ndarray] = None
         self.rf_probabilities: Optional[np.ndarray] = None
 
         self.learned_rf_thresholds: Optional[Dict[str, float]] = None
@@ -224,37 +239,92 @@ class DeepAutoencoder:
         )
         self.binary_labels = (~self.labels.isin(["BENIGN", "Benign"])).astype(int)
 
-        self.test_features = self.features.copy()
-        self.test_labels = self.binary_labels.copy()
+        # 3-way split: train (60%) / val (20%) / test (20%)
+        indices = np.arange(len(self.features))
 
-        print(f"BENIGN training samples: {len(self.benign_features):,}")
-        print(f"Total test samples: {len(self.test_features):,}")
+        train_val_idx, test_idx = train_test_split(
+            indices,
+            test_size=self.config.test_split,
+            stratify=self.binary_labels,
+            random_state=self.config.split_random_state,
+        )
+
+        val_ratio = self.config.val_split / (1 - self.config.test_split)
+        train_idx, val_idx = train_test_split(
+            train_val_idx,
+            test_size=val_ratio,
+            stratify=self.binary_labels.iloc[train_val_idx],
+            random_state=self.config.split_random_state,
+        )
+
+        self.train_features = self.features.iloc[train_idx].reset_index(drop=True)
+        self.train_labels = self.binary_labels.iloc[train_idx].reset_index(drop=True)
+        self.train_labels_orig = self.labels.iloc[train_idx].reset_index(drop=True)
+
+        self.val_features = self.features.iloc[val_idx].reset_index(drop=True)
+        self.val_labels = self.binary_labels.iloc[val_idx].reset_index(drop=True)
+        self.val_labels_orig = self.labels.iloc[val_idx].reset_index(drop=True)
+
+        self.test_features = self.features.iloc[test_idx].reset_index(drop=True)
+        self.test_labels = self.binary_labels.iloc[test_idx].reset_index(drop=True)
+        self.test_labels_orig = self.labels.iloc[test_idx].reset_index(drop=True)
+
+        print(f"BENIGN AE training samples: {len(self.benign_features):,}")
+        print(f"Train samples (RF): {len(self.train_features):,} "
+              f"(benign: {(self.train_labels == 0).sum():,}, "
+              f"attack: {(self.train_labels == 1).sum():,})")
+        print(f"Val samples (threshold): {len(self.val_features):,} "
+              f"(benign: {(self.val_labels == 0).sum():,}, "
+              f"attack: {(self.val_labels == 1).sum():,})")
+        print(f"Test samples (eval): {len(self.test_features):,} "
+              f"(benign: {(self.test_labels == 0).sum():,}, "
+              f"attack: {(self.test_labels == 1).sum():,})")
         print(f"Number of features: {self.features.shape[1]}")
 
     def preprocess_data(self) -> None:
         self.log.info("Preprocessing data...")
 
+        # Clean inf/NaN
         self.benign_features = self.benign_features.replace(
+            [np.inf, -np.inf], np.nan
+        ).fillna(self.config.fill_value)
+        self.train_features = self.train_features.replace(
+            [np.inf, -np.inf], np.nan
+        ).fillna(self.config.fill_value)
+        self.val_features = self.val_features.replace(
             [np.inf, -np.inf], np.nan
         ).fillna(self.config.fill_value)
         self.test_features = self.test_features.replace(
             [np.inf, -np.inf], np.nan
         ).fillna(self.config.fill_value)
 
+        # Winsorization (based on benign distribution)
         self.clip_params = {}
         for col in self.benign_features.columns:
             lower = self.benign_features[col].quantile(self.config.winsorize_lower)
             upper = self.benign_features[col].quantile(self.config.winsorize_upper)
             self.benign_features[col] = np.clip(self.benign_features[col], lower, upper)
+            self.train_features[col] = np.clip(self.train_features[col], lower, upper)
+            self.val_features[col] = np.clip(self.val_features[col], lower, upper)
             self.test_features[col] = np.clip(self.test_features[col], lower, upper)
             self.clip_params[col] = {"lower": float(lower), "upper": float(upper)}
 
+        # StandardScaler fit on benign only
         self.scaler = StandardScaler()
         self.benign_features_scaled = self.scaler.fit_transform(self.benign_features)
+        self.train_features_scaled = self.scaler.transform(self.train_features)
+        self.val_features_scaled = self.scaler.transform(self.val_features)
         self.test_features_scaled = self.scaler.transform(self.test_features)
 
+        # Post-scaling clip
         self.benign_features_scaled = np.clip(
             self.benign_features_scaled, self.config.clip_min, self.config.clip_max
+        )
+        self.train_features_scaled = np.clip(
+            self.train_features_scaled, self.config.clip_min, self.config.clip_max
+        )
+        self.val_features_scaled = np.clip(
+            self.val_features_scaled, self.config.clip_min, self.config.clip_max
         )
         self.test_features_scaled = np.clip(
             self.test_features_scaled, self.config.clip_min, self.config.clip_max
@@ -434,32 +504,39 @@ class DeepAutoencoder:
         for key, value in self.ae_normalization_params.items():
             print(f"  {key}: {value:.6f}")
 
+    def _ae_predict_mse(self, features_scaled: np.ndarray) -> np.ndarray:
+        batch_size = 2048
+        n_samples = len(features_scaled)
+        mse_scores = np.zeros(n_samples, dtype=np.float32)
+
+        with torch.no_grad():
+            for start in range(0, n_samples, batch_size):
+                end = min(start + batch_size, n_samples)
+                batch_data = torch.FloatTensor(features_scaled[start:end]).to(
+                    self.device
+                )
+                batch_pred = self.lightning_module(batch_data).cpu().numpy()
+                mse_scores[start:end] = np.mean(
+                    np.square(features_scaled[start:end] - batch_pred), axis=1
+                )
+
+        return mse_scores
+
     def predict_autoencoder(self) -> None:
         self.log.info("Calculating Deep AE anomaly scores...")
 
         self.lightning_module.eval()
         self.lightning_module.to(self.device)
 
-        batch_size = 2048
-        n_samples = len(self.test_features_scaled)
-        self.ae_mse_scores = np.zeros(n_samples, dtype=np.float32)
+        self.log.info("Predicting on validation set...")
+        self.ae_mse_scores_val = self._ae_predict_mse(self.val_features_scaled)
 
-        with torch.no_grad():
-            for start in range(0, n_samples, batch_size):
-                end = min(start + batch_size, n_samples)
-                batch_data = torch.FloatTensor(self.test_features_scaled[start:end]).to(
-                    self.device
-                )
-                batch_pred = self.lightning_module(batch_data).cpu().numpy()
-                self.ae_mse_scores[start:end] = np.mean(
-                    np.square(self.test_features_scaled[start:end] - batch_pred), axis=1
-                )
-                if (start // batch_size) % 500 == 0:
-                    print(f"Progress: {end:,}/{n_samples:,} ({end/n_samples*100:.1f}%)")
+        self.log.info("Predicting on test set...")
+        self.ae_mse_scores = self._ae_predict_mse(self.test_features_scaled)
 
+        # Stats on test set
         ae_mse_benign = self.ae_mse_scores[self.test_labels == 0]
         ae_mse_attack = self.ae_mse_scores[self.test_labels == 1]
-
         separation = ae_mse_attack.mean() / ae_mse_benign.mean()
 
         print(f"AE MSE statistics (test set):")
@@ -471,32 +548,37 @@ class DeepAutoencoder:
         )
         self.log.info(f"Separation: {separation:.2f}x")
 
-        web_attack_mask = self.labels.str.contains("Web Attack", na=False)
-        web_attack_scores = self.ae_mse_scores[web_attack_mask]
-
-        print(f"Web Attack MSE stats:")
-        print(f"  Mean: {web_attack_scores.mean():.6f}")
-        print(f"  Median: {np.median(web_attack_scores):.6f}")
-        print(f"  P99: {np.percentile(web_attack_scores, 99):.6f}")
-
-        benign_scores = self.ae_mse_scores[self.test_labels == 0]
-        print(f"BENIGN MSE P99: {np.percentile(benign_scores, 99):.6f}")
+        # Stats on val set
+        ae_mse_val_benign = self.ae_mse_scores_val[self.val_labels == 0]
+        ae_mse_val_attack = self.ae_mse_scores_val[self.val_labels == 1]
+        print(f"AE MSE statistics (val set):")
+        self.log.info(
+            f"BENIGN: Mean={ae_mse_val_benign.mean():.6f}, "
+            f"Median={np.median(ae_mse_val_benign):.6f}"
+        )
+        self.log.info(
+            f"Attack: Mean={ae_mse_val_attack.mean():.6f}, "
+            f"Median={np.median(ae_mse_val_attack):.6f}"
+        )
 
     def train_random_forest(self) -> None:
         self.log.info("Training Random Forest...")
 
-        benign_indices = np.where(self.binary_labels == 0)[0]
-        attack_indices = np.where(self.binary_labels == 1)[0]
+        # Balanced sampling from train set only
+        benign_indices = np.where(self.train_labels == 0)[0]
+        attack_indices = np.where(self.train_labels == 1)[0]
 
-        n_samples = min(self.config.rf_train_samples, len(attack_indices))
+        n_samples = min(
+            self.config.rf_train_samples, len(attack_indices), len(benign_indices)
+        )
         benign_sample = np.random.choice(benign_indices, n_samples, replace=False)
         attack_sample = np.random.choice(attack_indices, n_samples, replace=False)
 
-        train_indices = np.concatenate([benign_sample, attack_sample])
-        np.random.shuffle(train_indices)
+        sample_indices = np.concatenate([benign_sample, attack_sample])
+        np.random.shuffle(sample_indices)
 
-        rf_train_features = self.test_features_scaled[train_indices]
-        rf_train_labels = self.test_labels.iloc[train_indices]
+        rf_train_features = self.train_features_scaled[sample_indices]
+        rf_train_labels = self.train_labels.iloc[sample_indices]
 
         self.log.info(
             f"RF training data: {len(rf_train_features):,} "
@@ -517,17 +599,27 @@ class DeepAutoencoder:
         self.random_forest_model.fit(rf_train_features, rf_train_labels)
         self.log.info("RF training completed")
 
+        # Predict on val set (for threshold learning)
+        self.rf_probabilities_val = self.random_forest_model.predict_proba(
+            self.val_features_scaled
+        )[:, 1]
+        self.log.info("RF prediction on val set completed")
+
+        # Predict on test set (for final evaluation)
         self.rf_probabilities = self.random_forest_model.predict_proba(
             self.test_features_scaled
         )[:, 1]
-        self.log.info("RF prediction completed")
+        self.log.info("RF prediction on test set completed")
 
     def learn_rf_thresholds(self) -> None:
-        self.log.info("Learning RF thresholds from data (per-attack-type analysis)...")
+        self.log.info(
+            "Learning RF thresholds from VALIDATION set (per-attack-type analysis)..."
+        )
 
-        rf_probs = self.rf_probabilities
-        benign_probs = rf_probs[self.test_labels == 0]
-        attack_probs = rf_probs[self.test_labels == 1]
+        # Use validation set only — no data leakage into test evaluation
+        rf_probs_val = self.rf_probabilities_val
+        benign_probs = rf_probs_val[self.val_labels == 0]
+        attack_probs = rf_probs_val[self.val_labels == 1]
 
         # Learn global thresholds from benign distribution to control FPR
         # medium: ~3% FPR -> p97 of benign
@@ -544,24 +636,24 @@ class DeepAutoencoder:
             "high": learned_high,
         }
 
-        print(f"\nLearned RF thresholds (from benign distribution):")
+        print(f"\nLearned RF thresholds (from validation set benign distribution):")
         print(f"  medium (p97 of benign): {learned_medium:.4f}")
         print(f"  high  (p99.5 of benign): {learned_high:.4f}")
         print(f"  Config defaults were:  medium={self.config.rf_threshold_medium}, "
               f"high={self.config.rf_threshold_high}")
 
-        # Per-attack-type analysis
-        attack_labels_in_test = self.labels[self.test_labels == 1]
+        # Per-attack-type analysis on validation set
+        val_attack_labels = self.val_labels_orig[self.val_labels == 1]
         self.attack_type_rf_stats = {}
 
-        print(f"\nPer-attack-type RF probability analysis:")
+        print(f"\nPer-attack-type RF probability analysis (validation set):")
         print(f"  {'Attack Type':<30} {'Count':>6} {'Mean':>6} {'Med':>6} "
               f"{'P25':>6} {'P75':>6} {'Det@M':>6} {'Det@H':>6}")
         print(f"  {'-' * 96}")
 
-        for attack_type in sorted(attack_labels_in_test.unique()):
-            mask = self.labels == attack_type
-            probs = rf_probs[mask]
+        for attack_type in sorted(val_attack_labels.unique()):
+            mask = self.val_labels_orig == attack_type
+            probs = rf_probs_val[mask]
 
             if len(probs) == 0:
                 continue
@@ -587,10 +679,10 @@ class DeepAutoencoder:
                   f"{stats['p25']:>5.2f} {stats['p75']:>5.2f} "
                   f"{det_medium:>5.1%} {det_high:>5.1%}")
 
-        # Summary: overall attack detection
+        # Summary
         overall_det_medium = float((attack_probs >= learned_medium).mean())
         overall_det_high = float((attack_probs >= learned_high).mean())
-        print(f"\n  Overall attack detection: "
+        print(f"\n  Overall attack detection (val): "
               f"@medium={overall_det_medium:.1%}, @high={overall_det_high:.1%}")
 
     def create_weighted_voting(self) -> None:
@@ -746,14 +838,15 @@ class DeepAutoencoder:
         print(f"{'=' * 60}\n")
 
     def evaluate_attack_types(self) -> None:
-        self.log.info("Attack type detection rates...")
+        self.log.info("Attack type detection rates (test set)...")
 
-        attack_labels = self.labels[
-            ~self.labels.isin(["BENIGN", "Benign"]) & (self.labels.notna())
+        attack_labels = self.test_labels_orig[
+            ~self.test_labels_orig.isin(["BENIGN", "Benign"])
+            & (self.test_labels_orig.notna())
         ]
 
         for attack_type in sorted(attack_labels.unique()):
-            mask = self.labels == attack_type
+            mask = self.test_labels_orig == attack_type
             detected = (self.best_strategy["predictions"][mask] == 1).sum()
             total = mask.sum()
             rate = detected / total if total > 0 else 0
@@ -770,11 +863,11 @@ class DeepAutoencoder:
         os.makedirs("./artifacts", exist_ok=True)
         os.makedirs("./outputs", exist_ok=True)
 
-        output = self.features.copy()
+        output = self.test_features.copy()
         output["deep_ae_mse"] = self.ae_mse_scores
         output["rf_proba"] = self.rf_probabilities
         output["ensemble_anomaly"] = self.best_strategy["predictions"]
-        output["Label"] = self.labels.values
+        output["Label"] = self.test_labels_orig.values
 
         attack_anomaly_mask = (output["ensemble_anomaly"] == 1) & (
             ~output["Label"].isin(["BENIGN", "Benign"])
