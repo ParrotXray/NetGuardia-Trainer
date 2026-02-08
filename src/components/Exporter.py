@@ -258,6 +258,9 @@ class Exporter:
             "ae_thresholds": self.best_strategy.get("ae_thresholds", {}),
             "rf_thresholds": self.best_strategy.get("rf_thresholds", {}),
             "voting_weights": self.best_strategy.get("voting_weights", {}),
+            "attack_type_rf_stats": self.best_strategy.get(
+                "attack_type_rf_stats", {}
+            ),
         }
 
         if self.ae_normalization:

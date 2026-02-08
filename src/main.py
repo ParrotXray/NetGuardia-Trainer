@@ -52,6 +52,7 @@ if __name__ == "__main__":
         da.calculate_ae_normalization()
         da.predict_autoencoder()
         da.train_random_forest()
+        da.learn_rf_thresholds()
         da.create_weighted_voting()
         da.evaluate_voting()
         da.evaluate_attack_types()

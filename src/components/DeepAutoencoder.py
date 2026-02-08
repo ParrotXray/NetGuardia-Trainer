@@ -169,6 +169,9 @@ class DeepAutoencoder:
 
         self.rf_probabilities: Optional[np.ndarray] = None
 
+        self.learned_rf_thresholds: Optional[Dict[str, float]] = None
+        self.attack_type_rf_stats: Optional[Dict[str, Dict[str, Any]]] = None
+
         self.voting_predictions: Optional[np.ndarray] = None
         self.best_strategy: Optional[Dict[str, Any]] = None
 
@@ -519,21 +522,101 @@ class DeepAutoencoder:
         )[:, 1]
         self.log.info("RF prediction completed")
 
+    def learn_rf_thresholds(self) -> None:
+        self.log.info("Learning RF thresholds from data (per-attack-type analysis)...")
+
+        rf_probs = self.rf_probabilities
+        benign_probs = rf_probs[self.test_labels == 0]
+        attack_probs = rf_probs[self.test_labels == 1]
+
+        # Learn global thresholds from benign distribution to control FPR
+        # medium: ~3% FPR -> p97 of benign
+        # high:  ~0.5% FPR -> p99.5 of benign
+        learned_medium = float(np.percentile(benign_probs, 97))
+        learned_high = float(np.percentile(benign_probs, 99.5))
+
+        # Ensure minimum sensible values
+        learned_medium = max(learned_medium, 0.5)
+        learned_high = max(learned_high, min(learned_medium + 0.1, 0.95))
+
+        self.learned_rf_thresholds = {
+            "medium": learned_medium,
+            "high": learned_high,
+        }
+
+        print(f"\nLearned RF thresholds (from benign distribution):")
+        print(f"  medium (p97 of benign): {learned_medium:.4f}")
+        print(f"  high  (p99.5 of benign): {learned_high:.4f}")
+        print(f"  Config defaults were:  medium={self.config.rf_threshold_medium}, "
+              f"high={self.config.rf_threshold_high}")
+
+        # Per-attack-type analysis
+        attack_labels_in_test = self.labels[self.test_labels == 1]
+        self.attack_type_rf_stats = {}
+
+        print(f"\nPer-attack-type RF probability analysis:")
+        print(f"  {'Attack Type':<30} {'Count':>6} {'Mean':>6} {'Med':>6} "
+              f"{'P25':>6} {'P75':>6} {'Det@M':>6} {'Det@H':>6}")
+        print(f"  {'-' * 96}")
+
+        for attack_type in sorted(attack_labels_in_test.unique()):
+            mask = self.labels == attack_type
+            probs = rf_probs[mask]
+
+            if len(probs) == 0:
+                continue
+
+            det_medium = float((probs >= learned_medium).mean())
+            det_high = float((probs >= learned_high).mean())
+
+            stats = {
+                "count": int(len(probs)),
+                "mean": float(np.mean(probs)),
+                "median": float(np.median(probs)),
+                "std": float(np.std(probs)),
+                "p25": float(np.percentile(probs, 25)),
+                "p75": float(np.percentile(probs, 75)),
+                "detection_rate_medium": det_medium,
+                "detection_rate_high": det_high,
+            }
+            self.attack_type_rf_stats[attack_type] = stats
+
+            status = "GOOD" if det_medium > 0.8 else "WARN" if det_medium > 0.5 else "POOR"
+            print(f"  [{status}] {attack_type[:26]:<26} {stats['count']:>6,} "
+                  f"{stats['mean']:>5.2f} {stats['median']:>5.2f} "
+                  f"{stats['p25']:>5.2f} {stats['p75']:>5.2f} "
+                  f"{det_medium:>5.1%} {det_high:>5.1%}")
+
+        # Summary: overall attack detection
+        overall_det_medium = float((attack_probs >= learned_medium).mean())
+        overall_det_high = float((attack_probs >= learned_high).mean())
+        print(f"\n  Overall attack detection: "
+              f"@medium={overall_det_medium:.1%}, @high={overall_det_high:.1%}")
+
     def create_weighted_voting(self) -> None:
         self.log.info("Creating Weighted Voting ensemble predictions...")
 
         ae_threshold_high = self.ae_normalization_params["ae_threshold_high"]
         ae_threshold_medium = self.ae_normalization_params["ae_threshold_medium"]
         ae_threshold_low = self.ae_normalization_params["ae_threshold_low"]
-        rf_threshold_high = self.config.rf_threshold_high
-        rf_threshold_medium = self.config.rf_threshold_medium
+
+        # Use learned RF thresholds if available, otherwise fall back to config
+        if self.learned_rf_thresholds is not None:
+            rf_threshold_high = self.learned_rf_thresholds["high"]
+            rf_threshold_medium = self.learned_rf_thresholds["medium"]
+            self.log.info("Using learned RF thresholds")
+        else:
+            rf_threshold_high = self.config.rf_threshold_high
+            rf_threshold_medium = self.config.rf_threshold_medium
+            self.log.info("Using config RF thresholds (no learned thresholds)")
 
         self.log.info(
             f"AE thresholds: low={ae_threshold_low:.6f}, "
             f"medium={ae_threshold_medium:.6f}, high={ae_threshold_high:.6f}"
         )
         self.log.info(
-            f"RF thresholds: medium={rf_threshold_medium}, high={rf_threshold_high}"
+            f"RF thresholds: medium={rf_threshold_medium:.4f}, "
+            f"high={rf_threshold_high:.4f}"
         )
 
         rf_pred = self.random_forest_model.predict(self.test_features_scaled)
@@ -619,6 +702,15 @@ class DeepAutoencoder:
         prec = tp / (tp + fp) if (tp + fp) > 0 else 0
         f1 = 2 * prec * tpr / (prec + tpr) if (prec + tpr) > 0 else 0
 
+        # Use learned RF thresholds if available
+        if self.learned_rf_thresholds is not None:
+            effective_rf_thresholds = self.learned_rf_thresholds
+        else:
+            effective_rf_thresholds = {
+                "high": self.config.rf_threshold_high,
+                "medium": self.config.rf_threshold_medium,
+            }
+
         self.best_strategy = {
             "name": "WeightedVoting",
             "predictions": pred,
@@ -635,14 +727,12 @@ class DeepAutoencoder:
                 "medium": self.ae_normalization_params["ae_threshold_medium"],
                 "low": self.ae_normalization_params["ae_threshold_low"],
             },
-            "rf_thresholds": {
-                "high": self.config.rf_threshold_high,
-                "medium": self.config.rf_threshold_medium,
-            },
+            "rf_thresholds": effective_rf_thresholds,
             "voting_weights": {
                 "ae": self.config.ae_voting_weight,
                 "rf": self.config.rf_voting_weight,
             },
+            "attack_type_rf_stats": self.attack_type_rf_stats or {},
         }
 
         print(f"\n{'=' * 60}")
@@ -722,7 +812,7 @@ class DeepAutoencoder:
         best_strategy_serializable = {
             k: v
             for k, v in self.best_strategy.items()
-            if k != "predictions"
+            if k not in ("predictions", "attack_type_rf_stats")
         }
 
         config_data = {
